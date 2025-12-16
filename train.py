@@ -12,12 +12,12 @@ from new_model import PolytopeConstrainedFlowModel
 from utils import ot_minibatch_coupling, set_all_seed
 
 
-def train_discrete_delta(dataset: TrajDataset, iteration=2000, lr=1e-4, batch_size=50, steps=10, use_ot=True):
+def train_discrete_delta(dataset: TrajDataset, iteration=2000, lr=1e-4, batch_size=50, steps=10, use_ot=True, device="cuda:0"):
     """
     训练模型直接预测两个离散时间点之间的差值 (Delta x)
     Target = x_{k+1} - x_k
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device} | Prediction Target: Delta x (Steps={steps})")
     
     # load dataset
