@@ -68,7 +68,7 @@ class TrajDataset(Dataset):
                     curA = A[idx][i] # (num_cons, x_dim)
                     curb = b[idx][i] # (num_cons,)
                     center, radius = chebyshev_center_lp(curA, curb)
-                    sample_points = uniform_sample_in_ball(center, radius, num_samples=1)
+                    sample_points = uniform_sample_in_ball(center, radius, num_samples=1).reshape(1, -1)
                     sample_points_list.append(sample_points)
                 sample = torch.concatenate(sample_points_list, dim=-1) # (1, seq_length*x_dim)
                 sample_list.append(sample)  
@@ -86,7 +86,7 @@ class TrajDataset(Dataset):
                     A = self.single_A[idx][i] # (num_cons, x_dim)
                     b = self.single_b[idx][i] # (num_cons,)
                     center, radius = chebyshev_center_lp(A, b)
-                    sample_points = uniform_sample_in_ball(center, radius, num_samples=1)
+                    sample_points = uniform_sample_in_ball(center, radius, num_samples=1).reshape(1, -1)
                     sample_points_list.append(sample_points)
                 sample = torch.concatenate(sample_points_list, dim=-1) # (1, seq_length*x_dim)
                 sample_list.append(sample)
@@ -143,3 +143,91 @@ class ConstantConsTrajDataset(TrajDataset):
         b_batch = torch.from_numpy(self.single_b[0]).unsqueeze(0).repeat(batch_size, 1, 1)    # [B, T, 4]
 
         return sample_batch, A_batch, b_batch 
+    
+class BoxConsTrajDataset(TrajDataset):
+
+    def generate_prior_data(self, batch_size, A=None, b=None):
+        """
+        通用维度 (General Dimension) 的并行采样函数。
+        支持任意 x_dim 维度的 Box 约束，在 Chebyshev 球内进行均匀采样。
+        
+        假设约束 b 的排列格式为: [x0_max, -x0_min, x1_max, -x1_min, ..., xm_max, -xm_min]
+        
+        :param batch_size: 采样数量
+        :param A: (B, L, 2*x_dim, x_dim) [可选] 实际上对于 Box 约束计算不需要 A，只需要 b
+        :param b: (B, L, 2*x_dim)        [可选] 
+        :return: 
+            sample_batch: (B, L * x_dim)
+            A_batch, b_batch
+        """
+        
+        # 1. 准备数据
+        # ------------------------------------------------------------------
+        if (A is not None) and (b is not None):
+            if not isinstance(A, torch.Tensor): A = torch.tensor(A, dtype=torch.float32)
+            if not isinstance(b, torch.Tensor): b = torch.tensor(b, dtype=torch.float32)
+            A_batch, b_batch = A, b
+        else:
+            indices = np.random.choice(self.num_traj, batch_size, replace=True)
+            A_batch = torch.from_numpy(self.single_A[indices]).float()
+            b_batch = torch.from_numpy(self.single_b[indices]).float()
+
+        # 2. 解析 Box 约束边界
+        # ------------------------------------------------------------------
+        # b_batch shape: (B, L, 2 * x_dim)
+        # 我们将其 Reshape 为 (B, L, x_dim, 2) 以便成对处理 (max, -min)
+        # dim -1 的 index 0 对应 x_i_max
+        # dim -1 的 index 1 对应 -x_i_min
+        
+        B, L, num_cons = b_batch.shape
+        x_dim = num_cons // 2 # 推断维度
+        
+        b_reshaped = b_batch.view(B, L, x_dim, 2)
+        
+        # 提取上下界
+        # upper: x_i <= val
+        # lower: -x_i <= val => x_i >= -val
+        upper_bounds = b_reshaped[..., 0]      # (B, L, x_dim)
+        lower_bounds = -b_reshaped[..., 1]     # (B, L, x_dim)
+        
+        # 3. 计算 Chebyshev 中心和半径
+        # ------------------------------------------------------------------
+        # 矩形在每个维度上的边长
+        side_lengths = upper_bounds - lower_bounds # (B, L, x_dim)
+        
+        # 几何中心 (Chebyshev Center)
+        centers = (upper_bounds + lower_bounds) / 2.0 # (B, L, x_dim)
+        
+        # 半径 (Chebyshev Radius)
+        # 半径是所有维度中，最短边长的一半
+        # keepdim=True 保持 (B, L, 1) 方便后续广播
+        min_side_len, _ = torch.min(side_lengths, dim=-1, keepdim=True)
+        radius = min_side_len / 2.0 
+        
+        # 4. 高维球体均匀采样 (Muller's Method)
+        # ------------------------------------------------------------------
+        # 步骤 A: 在单位球面上随机采样方向向量
+        # 方法: 生成标准正态分布变量，然后归一化
+        normal_samples = torch.randn(B, L, x_dim, device=b_batch.device)
+        norms = torch.norm(normal_samples, p=2, dim=-1, keepdim=True)
+        
+        # 防止除以0 (极小概率事件，但为了鲁棒性)
+        unit_vectors = normal_samples / (norms + 1e-8)
+        
+        # 步骤 B: 采样径向距离 r
+        # 为了保证在 N 维球体内均匀分布，r = U^(1/N) * R
+        # 其中 U ~ Uniform(0, 1)
+        u = torch.rand(B, L, 1, device=b_batch.device)
+        scale_factors = torch.pow(u, 1.0 / x_dim)
+        
+        # 步骤 C: 组合得到偏移量
+        offsets = unit_vectors * scale_factors * radius
+        
+        # 5. 得到最终样本
+        # ------------------------------------------------------------------
+        sample_points = centers + offsets # (B, L, x_dim)
+        
+        # 展平输出
+        sample_batch = sample_points.reshape(batch_size, -1) # (B, L * x_dim)
+
+        return sample_batch, A_batch, b_batch

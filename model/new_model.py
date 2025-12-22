@@ -325,6 +325,60 @@ class TrajEncoder(nn.Module):
 
         return tokens
         
+class OneWeightDecoder(nn.Module):
+    def __init__(self, x_dim, embed_dim, max_seq, num_rays, num_heads, num_layers, device='cuda'):
+        super().__init__()
+        self.x_dim = x_dim
+        self.embed_dim = embed_dim
+        self.max_seq = max_seq
+        self.num_rays = num_rays
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.device = device
+
+        assert self.num_rays == 1
+
+        # input [batch_size, seq_length, x_dim+embed_dim] 最后一维表示 方向+模长 + 轨迹embed信息
+
+        self.input_proj = build_mlp(x_dim, hidden_dims=[embed_dim], output_dim=embed_dim).to(device)
+
+        self.attn_blocks = nn.ModuleList([
+            AdaLNBlock(hidden_dim=embed_dim, num_heads=num_heads) for _ in range(num_layers)
+        ]).to(device)
+
+        self.final_norm = nn.LayerNorm(embed_dim).to(device)
+        self.output_proj = nn.Linear(embed_dim, 1).to(device)
+
+    def forward(self, rays, traj_embed, t_embed, attn_mask=None, key_padding_mask=None):
+        """
+        Docstring for forward
+        
+        :param self: Description
+        :param rays: (B, S, num_rays, x_dim)
+        :param traj_embed: (B, S, embed_dim)
+        :param t_embed: (B)
+        :param attn_mask: (S*num_rays, S*num_rays)
+        :param key_padding_mask: Description
+        """
+        batch_size = rays.size(0)
+
+        # (B, S*num_rays, embed_dim)
+        tokens = self.input_proj(rays)
+        tokens = tokens.reshape(batch_size, self.max_seq*self.num_rays, self.embed_dim)
+
+        tokens = tokens + traj_embed  # fusion 融合轨迹信息和边界信息
+
+        for block in self.attn_blocks:
+            tokens = block(tokens, t_embed, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+
+        tokens = self.final_norm(tokens)
+
+        # (B, S, num_rays)
+        weight = self.output_proj(tokens).reshape(batch_size, self.max_seq, self.num_rays)
+        weight = F.sigmoid(weight)
+
+        return weight
+
 class WeightDecoder(nn.Module):
     def __init__(self, x_dim, embed_dim, max_seq, num_rays, num_heads, num_layers, device='cuda'):
         super().__init__()
@@ -342,24 +396,26 @@ class WeightDecoder(nn.Module):
             AdaLNBlock(hidden_dim=embed_dim, num_heads=num_heads) for _ in range(num_layers)
         ]).to(device)
 
-        self.final_norm = nn.LayerNorm(embed_dim)
-        self.output_proj = nn.Linear(embed_dim, 1)
+        self.final_norm = nn.LayerNorm(embed_dim).to(device)
+        self.output_proj = nn.Linear(embed_dim, 1).to(device)
 
-    def forward(self, rays, t_embed, attn_mask=None, key_padding_mask=None):
+    def forward(self, rays, traj_embed, t_embed, attn_mask=None, key_padding_mask=None):
         """
         Docstring for forward
         
         :param self: Description
         :param rays: (B, S, num_rays, x_dim)
+        :param traj_embed (B, S, embed_dim)
         :param t_embed: (B)
         :param attn_mask: (S*num_rays, S*num_rays)
         :param key_padding_mask: Description
         """
         batch_size = rays.size(0)
 
-        # (B, S*num_rays, embed_dim)
+        
         tokens = self.input_proj(rays)
-        tokens = tokens.reshape(batch_size, self.max_seq*self.num_rays, self.embed_dim)
+        tokens = tokens + traj_embed.unsqueeze(2) # (B, S, num_rays, embed_dim)
+        tokens = tokens.reshape(batch_size, self.max_seq*self.num_rays, self.embed_dim) # (B, S*num_rays, embed_dim)
 
         for block in self.attn_blocks:
             tokens = block(tokens, t_embed, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
@@ -368,7 +424,10 @@ class WeightDecoder(nn.Module):
 
         # (B, S, num_rays)
         weight = self.output_proj(tokens).reshape(batch_size, self.max_seq, self.num_rays)
-        weight = F.softmax(weight, dim=-1)
+        if self.num_rays == 1:
+            weight = F.sigmoid(weight)
+        else:
+            weight = F.softmax(weight, dim=-1)
 
         return weight
 
@@ -382,6 +441,8 @@ class PolytopeConstrainedFlowModel(nn.Module):
                  use_block_mask_cross=True, use_block_mask_weight=True,
                  device='cuda'):
         super().__init__()
+
+        assert num_rays >= 1
 
         self.x_dim = x_dim
         self.num_cons = num_cons
@@ -479,7 +540,11 @@ class PolytopeConstrainedFlowModel(nn.Module):
         boundary_vectors = self.ray_shooter(x_reshaped, rays, A, b)
 
         # weight (B, S, num_rays)
-        weights = self.weight_decoder(rays, t_emb, attn_mask=self.weight_attn_mask)
+        if self.num_rays == 1:
+            weights = self.weight_decoder(boundary_vectors, e, t_emb)
+        else:
+            weights = self.weight_decoder(boundary_vectors, e, t_emb, attn_mask=self.weight_attn_mask)
+
 
         # (B, S, x_dim)
         v_geometric = torch.einsum('bsk,bskd->bsd', weights, boundary_vectors)
@@ -492,159 +557,132 @@ class PolytopeConstrainedFlowModel(nn.Module):
         return delta_x, boundary_vectors, weights
 
 
-
-
-
-class UnconstrainedFlowModel(nn.Module):
-    """
-    Teacher Model: 一个标准的 ResNet/MLP Flow Model
-    输入: x (B, dim), t (B, 1)
-    输出: v (B, dim)
-    """
-    def __init__(self, x_dim=2, hidden_dim=128, time_embed_dim=64):
+class PolytopeConstrainedOneRayFlowModel(nn.Module):
+    def __init__(self, 
+                 x_dim, 
+                 num_cons, 
+                 num_rays, 
+                 max_seq, 
+                 embed_dim=128, 
+                 num_heads_cons=4, num_layers_cons=2, 
+                 num_heads_traj=4, num_layers_traj=2, 
+                 num_heads_weight=4, num_layers_weight=2, 
+                 time_embed_scale=1000, 
+                 use_block_mask_cons=True, use_block_mask_cross=True, use_block_mask_weight=True, 
+                 device='cuda'):
         super().__init__()
-        self.time_mlp = nn.Sequential(
-            SinusoidalTimeEmb(time_embed_dim), # 复用你之前的 SinusoidalTimeEmb
-            nn.Linear(time_embed_dim, time_embed_dim),
-            nn.SiLU(),
-            nn.Linear(time_embed_dim, hidden_dim)
-        )
-        
-        self.input_mlp = nn.Sequential(
-            nn.Linear(x_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
 
-        self.body = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, x_dim)
-        )
+        assert num_rays == 1
 
-    def forward(self, x, t):
-        # x: [B, S, D] or [B, D] -> flatten if needed
-        # 这里假设输入已经展平或者是2D点
-        
-        orig_shape = x.shape
-        if len(x.shape) > 2:
-            x = x.reshape(x.shape[0], -1)
-            
-        t_emb = self.time_mlp(t)
-        x_emb = self.input_mlp(x)
-        
-        # 简单的 Featurewise 加法融合
-        h = x_emb + t_emb
-        out = self.body(h)
-        
-        return out.reshape(orig_shape)
-    
-
-class ConditionalFlowMatchingTeacher(nn.Module):
-    """
-    Teacher Model: 一个条件 Flow Matching 模型 (CFM)
-    学习目标: p(Y | X_t, t)
-    
-    由内部虚拟时间 tau 驱动:
-    输入: 
-        - y_tau: 当前 Flow 状态 (B, x_dim)
-        - tau: 内部 Flow 时间 (B, 1)
-        - x_t: 外部条件 - 当前轨迹位置 (B, x_dim)
-        - t: 外部条件 - 当前轨迹时间 (B, 1)
-        
-    输出: 
-        - v_tau: 在 Y 空间上的速度场 (B, x_dim)
-    """
-    def __init__(self, x_dim, hidden_dim=256, time_embed_dim=64):
-        super().__init__()
         self.x_dim = x_dim
-        
-        # 1. 外部条件编码 (Condition Embedding)
-        # 编码 t
-        self.t_mlp = nn.Sequential(
-            SinusoidalTimeEmb(time_embed_dim),
-            nn.Linear(time_embed_dim, time_embed_dim),
-            nn.SiLU()
-        )
-        # 编码 X_t
-        self.xt_mlp = nn.Sequential(
-            nn.Linear(x_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        )
-        
-        # 2. 内部 Flow 状态编码 (Flow State Embedding)
-        # 编码 tau
-        self.tau_mlp = nn.Sequential(
-            SinusoidalTimeEmb(time_embed_dim),
-            nn.Linear(time_embed_dim, time_embed_dim),
-            nn.SiLU()
-        )
-        # 编码 y_tau (也就是正在生成的 Y 的中间态)
-        self.y_mlp = nn.Sequential(
-            nn.Linear(x_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim)
+        self.num_cons = num_cons
+        self.num_rays = num_rays
+        self.max_seq = max_seq
+        self.embed_dim = embed_dim
+        self.use_block_mask_cons = use_block_mask_cons
+        self.device = device
+
+        self.constraint_encoder = ConstraintEncoder(
+            x_dim=x_dim, embed_dim=embed_dim, num_cons=num_cons,
+            max_seq=max_seq, num_heads=num_heads_cons, num_layers=num_layers_cons,
+            use_block_mask=use_block_mask_cons, device=device
         )
 
-        # 3. 融合与预测网络
-        # 输入维度: hidden(xt) + embed(t) + hidden(y) + embed(tau)
-        input_concat_dim = hidden_dim + time_embed_dim + hidden_dim + time_embed_dim
-        
-        self.net = nn.Sequential(
-            nn.Linear(input_concat_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, x_dim) # 输出 Y 空间的速度
+        self.traj_encoder = TrajEncoder(
+            x_dim=x_dim, embed_dim=embed_dim, max_seq=max_seq,
+            num_heads=num_heads_traj, num_layers=num_layers_traj,
+            device=device
         )
 
-    def forward(self, y_tau, tau, x_t, t):
-        # 确保输入是 Flatten 的 (B, D)
-        if len(x_t.shape) > 2: x_t = x_t.reshape(x_t.size(0), -1)
-        if len(y_tau.shape) > 2: y_tau = y_tau.reshape(y_tau.size(0), -1)
+        # 对flow的时间输入进行编码
+        self.time_mlp = nn.Sequential(
+            SinusoidalTimeEmb(dim=embed_dim, scale=time_embed_scale),
+            nn.Linear(embed_dim, embed_dim),
+            nn.SiLU(),
+            nn.Linear(embed_dim, embed_dim)
+        ).to(device)
+
+        # Cross Attention Block (Fusion)
+        # Q: Traj Point, K,V: Constraints
+        self.cross_attn = CrossAttentionBlock(
+            embed_dim=embed_dim, num_heads=num_heads_traj
+        ).to(device)
+        if use_block_mask_cross:
+            self.cross_attn_mask = create_block_cross_attention_mask(
+                query_len=self.max_seq, key_len=self.max_seq*self.num_cons, n=1, m=self.num_cons, T=self.max_seq, device=device
+            )
+        else:
+            self.cross_attn_mask = None
+
+        # 输出rays头
+        self.ray_mlp = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, num_rays*x_dim)
+        ).to(device)
+
+        # 计算边界点
+        self.ray_shooter = EfficientRayShootingLayer().to(device)
+
+        # 计算weight
+        # self.weight_decoder = WeightDecoder(
+        #     x_dim=x_dim, embed_dim=embed_dim, max_seq=max_seq, num_rays=num_rays,
+        #     num_heads=num_heads_weight, num_layers=num_layers_weight, device=device
+        # ).to(device)
+        # if use_block_mask_weight:
+        #     self.weight_attn_mask = create_block_diagonal_mask(T=self.max_seq, block_size=self.num_rays, device=device)
+        # else:
+        #     self.weight_attn_mask = None
+        self.weight_decoder: OneWeightDecoder = OneWeightDecoder(
+            x_dim=x_dim, embed_dim=embed_dim, max_seq=max_seq, num_rays=1,
+            num_heads=num_heads_weight, num_layers=num_layers_weight, device=device
+        )
+
+    def forward(self, x, t, A, b):
+        """
+        Docstring for forward
         
-        # 编码
-        t_emb = self.t_mlp(t)      # (B, T_dim)
-        xt_emb = self.xt_mlp(x_t)  # (B, H_dim)
-        
-        tau_emb = self.tau_mlp(tau) # (B, T_dim)
-        y_emb = self.y_mlp(y_tau)   # (B, H_dim)
-        
-        # 拼接条件
-        # 我们要预测的是: 给定 x_t, t, 在 tau 时刻, y_tau 的变化率
-        concat_feat = torch.cat([xt_emb, t_emb, y_emb, tau_emb], dim=-1)
-        
-        v_pred = self.net(concat_feat)
-        return v_pred
+        :param self: Description
+        :param x: [B, x_dim*S]
+        :param t: [B]
+        :param A: [B, S, num_cons, x_dim]
+        :param b: [B, S, num_cons]
+        """
+
+        batch_size = x.size(0)
+
+        # 数据整形
+        x_reshaped = x.view(batch_size, self.max_seq, self.x_dim)
+
+        # 构造时间embed (B, embed_dim)
+        t_emb = self.time_mlp(t)
+
+        # (B, S, embed_dim)
+        traj_lat = self.traj_encoder(x_reshaped, t_emb)
+
+        # (B, S, num_cons, embed_dim)
+        cons_lat = self.constraint_encoder(A, b)
+
+        # Q: (B, S, embed_dim), K: (B, S*num_cons, embed_dim)
+        cons_lat = cons_lat.reshape(batch_size, self.max_seq*self.num_cons, self.embed_dim)
+        e, _ = self.cross_attn(query=traj_lat, key_value=cons_lat, attn_mask=self.cross_attn_mask)
+
+        # ray (B, S, num_rays, x_dim)
+        rays = self.ray_mlp(e).view(batch_size, self.max_seq, self.num_rays, self.x_dim)
+        rays = F.normalize(rays, p=2, dim=-1)
+
+        # ray shooting (B, S, num_rays, x_dim)
+        boundary_vectors = self.ray_shooter(x_reshaped, rays, A, b)
+
+        # weight (B, S, num_rays)
+        weights = self.weight_decoder(boundary_vectors, traj_embed=e, t_embed=t_emb)
+
+        # (B, S, x_dim)
+        v_geometric = torch.einsum('bsk,bskd->bsd', weights, boundary_vectors)
+
+        delta_x_reshaped = v_geometric
+
+        # (B, S*x_dim)
+        delta_x = delta_x_reshaped.reshape(batch_size, -1)
+
+        return delta_x, boundary_vectors, weights
     
-    @torch.no_grad()
-    def generate_y(self, x_t, t, steps=20):
-        """
-        Teacher Inference: 使用 ODE Solver 生成 Y
-        求解从 tau=0 (Gaussian) 到 tau=1 (True Y) 的过程
-        """
-        B = x_t.shape[0]
-        device = x_t.device
-        
-        # 1. 初始噪声 y_0 ~ N(0, 1)
-        y_tau = torch.randn(B, self.x_dim, device=device)
-        
-        # 2. 欧拉积分求解 ODE
-        d_tau = 1.0 / steps
-        # tau 从 0 走到 1
-        for step in range(steps):
-            tau_curr = torch.ones(B, device=device) * (step * d_tau)
-            
-            # 预测速度
-            v_tau = self.forward(y_tau, tau_curr, x_t, t)
-            
-            # 更新状态
-            y_tau = y_tau + v_tau * d_tau
-            
-        return y_tau

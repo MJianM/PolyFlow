@@ -8,11 +8,11 @@ import math
 import tqdm 
 
 from dataset import TrajDataset, ConstantConsTrajDataset
-from new_model import PolytopeConstrainedFlowModel
+from model.new_model import PolytopeConstrainedFlowModel, PolytopeConstrainedOneRayFlowModel
 from utils import ot_minibatch_coupling, set_all_seed
 
 
-def train_discrete_delta(dataset: TrajDataset, iteration=2000, lr=1e-4, batch_size=50, steps=10, use_ot=True, device="cuda:0"):
+def train_discrete_delta(dataset: TrajDataset, iteration=2000, lr=1e-4, batch_size=50, steps=10, use_ot=True, use_one_ray=False, device="cuda:0"):
     """
     训练模型直接预测两个离散时间点之间的差值 (Delta x)
     Target = x_{k+1} - x_k
@@ -26,12 +26,22 @@ def train_discrete_delta(dataset: TrajDataset, iteration=2000, lr=1e-4, batch_si
     num_cons = dataset.num_cons
     x_dim = dataset.x_dim
 
-    model = PolytopeConstrainedFlowModel(
-        x_dim=x_dim, num_cons=num_cons, num_rays=x_dim+1, max_seq=max_seq,
-        use_block_mask_cons=True, use_block_mask_cross=True,
-        use_block_mask_weight=True,
-        device=device
-    )
+    if use_one_ray:
+        num_rays = 1
+        model = PolytopeConstrainedOneRayFlowModel(
+            x_dim=x_dim, num_cons=num_cons, num_rays=num_rays, max_seq=max_seq,
+            use_block_mask_cons=True, use_block_mask_cross=True,
+            use_block_mask_weight=True,
+            device=device
+        )
+    else:
+        num_rays = x_dim + 1
+        model = PolytopeConstrainedFlowModel(
+            x_dim=x_dim, num_cons=num_cons, num_rays=num_rays, max_seq=max_seq,
+            use_block_mask_cons=True, use_block_mask_cross=True,
+            use_block_mask_weight=True,
+            device=device
+        )
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iteration, eta_min=1e-6)
     

@@ -1,4 +1,10 @@
 
-.out
-.npz
+*.out
+*.npz
+*.png
+
+*.pt
+
+
 __pycache__
+

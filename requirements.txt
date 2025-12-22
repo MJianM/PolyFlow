@@ -1,6 +1,8 @@
 
 POT==0.9.6
 cvxpy==1.7.5
+cvxpylayers==0.1.9
+cvxopt==1.3.2
 pandas==2.3.3
 scipy==1.15.3
 torch==2.5.0+cu124
@@ -8,3 +10,12 @@ tqdm==4.67.1
 matplotlib==3.10.7
 stable_baselines3==2.7.1
 gymnasium==1.2.2
+gymnasium-robotics==1.4.1
+mujoco==3.4.0
+minari==0.5.3
+h5py==3.15.1
+moviepy==2.2.1
+jax==0.6.2
+einops==0.8.1
+qpth==0.0.18
+scikit-video==1.1.11
