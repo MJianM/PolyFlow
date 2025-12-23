@@ -1,0 +1,6 @@
+defaults:
+  - default
+
+
+_target_: utils.dataset.ConstantConsTrajDataset
+file_path: ${file_path} # 相对路径

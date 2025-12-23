@@ -1,0 +1,35 @@
+
+env_name: "test"
+algo_name: "test"
+run_name: "test" # 这次实验的名字
+seed: 42
+device: "cuda:0"
+
+
+optimizer:
+  _target_: torch.optim.Adam
+  # _partial_: true  # 关键！表示这是一个部分初始化的对象
+  lr: ${train.lr}
+
+lr_scheduler:
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: ${train.iteration}
+  eta_min: 1e-6
+
+train_dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: ${train.batch_size}
+  shuffle: true
+
+val_dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: ${train.batch_size}
+  shuffle: true
+
+# Hydra 配置: 决定日志保存在哪里
+hydra:
+  run:
+    # 动态生成目录
+    dir: outputs/${env_name}/${algo_name}_${run_name}/${seed}_${now:%Y-%m-%d}_${now:%H-%M-%S}
+  job:
+    chdir: true  # 进入输出目录运行 (这样产生的 tensorboard 就在该目录下)

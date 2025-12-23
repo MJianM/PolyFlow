@@ -1,0 +1,54 @@
+
+
+defaults:
+  - dataset: box_constraint
+  - env: maze2d
+  - model: poly_flow_oneray
+  - default
+  - _self_  # 允许主配置覆盖默认值
+
+# 实验名称 (用于文件夹命名)
+env_name: "maze2d"
+algo_name: "oneray"
+run_name: "train" # 这次实验的名字
+seed: 42
+device: "cuda:3"
+
+x_dim: 2
+num_cons: 4
+num_rays: 1
+max_seq: 300
+steps: 10 # 离散步数
+
+file_path: "data/large_maze_traj_data_expand_02.npz"
+
+# 采样参数
+sample:
+  method: "discrete" # discrete, flow, diffusion
+  steps: ${steps}
+  device: ${device}
+  projection: "none"
+
+
+# 训练超参数
+train:
+  method: "discrete" # discrete, flow, diffusion
+  iteration: 10000 # 训练steps
+  lr: 1e-4
+  batch_size: 100
+  steps: ${steps}        # 离散时间步数
+  eval_freq: 1000
+  log_freq: 100
+  save_freq: 5000
+  use_ot: true
+  use_one_ray: true
+  device: ${device}
+  seed: ${seed}
+
+eval:
+  eval_samples: 100
+  plot_ellips: false
+  max_plot_traj: 5
+
+
+

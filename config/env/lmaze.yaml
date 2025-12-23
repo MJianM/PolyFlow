@@ -1,0 +1,5 @@
+defaults:
+  - default
+
+
+_target_: env.lmaze_env.LMazeEnv

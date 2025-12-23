@@ -2,9 +2,11 @@
 *.out
 *.npz
 *.png
-
+*.mp4
 *.pt
-
+*.0
+events.out.*
 
 __pycache__
 
+outputs/

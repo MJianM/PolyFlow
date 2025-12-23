@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from utils import build_mlp, create_block_diagonal_mask, create_block_cross_attention_mask, EfficientRayShootingLayer
+from utils.utils import build_mlp, create_block_diagonal_mask, create_block_cross_attention_mask, EfficientRayShootingLayer
 
 class SequencePositionalEncoding(nn.Module):
     """
