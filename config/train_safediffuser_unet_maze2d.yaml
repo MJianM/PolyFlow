@@ -1,0 +1,9 @@
+
+defaults:
+  - train_safediffuser_maze2d
+  - override model: diffusion_unet
+  - _self_
+
+
+algo_name: "safediffuser-unet"
+device: "cuda:4"

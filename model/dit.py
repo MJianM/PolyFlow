@@ -34,6 +34,49 @@ class SinusoidalTimeEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
+class SinusoidalTimeDiffusionEmb(nn.Module):
+    def __init__(self, dim, max_period=10000):
+        """
+        适用于 Diffusion Model 的正弦时间编码
+        dim: 输出维度 (通常与模型宽度的 time_emb_dim 一致)
+        max_period: 周期基数，Transformer 论文中默认为 10000
+        """
+        super().__init__()
+        self.dim = dim
+        self.max_period = max_period
+
+    def forward(self, timesteps):
+        """
+        timesteps: [batch_size]
+            - 如果是 DDPM，输入通常是 Int/Long 类型，范围 [0, T]
+            - 如果是 Continuous Diffusion，输入是 Float，但通常数值较大 (e.g. sigma)
+        """
+        device = timesteps.device
+        half_dim = self.dim // 2
+
+        # 1. 计算频率衰减项
+        # 公式: exp(-ln(10000) * (2i / d))
+        # 注意：这里除以 half_dim 而不是 half_dim - 1，这是标准的 Transformer/DDPM 实现方式
+        freqs = torch.exp(
+            -math.log(self.max_period) * torch.arange(start=0, end=half_dim, dtype=torch.float32, device=device) / half_dim
+        )
+
+        # 2. 将时间步转换为 float 并计算参数
+        # timesteps: [B] -> args: [B, D/2]
+        # 这里不需要手动 * scale，因为 diffusion 的 timesteps 本身已经是大数值 (0~1000)
+        args = timesteps[:, None].float() * freqs[None, :]
+
+        # 3. 拼接 sin 和 cos
+        # [B, D/2] -> [B, D]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        
+        # 处理奇数维度的情况 (虽然很少见，但为了健壮性)
+        if self.dim % 2 == 1:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+
+        return embedding
+
+
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super().__init__()
@@ -186,7 +229,40 @@ class TrajectoryDiT(nn.Module):
         
         return out
 
+class TrajectoryDiTConditional(TrajectoryDiT):
+    """
+    条件 DiT 模型
+    输入: x (B, Horizon, x_dim), cond (B, cond_dim), t (B,)
+    输出: v (B, Horizon, x_dim)
+    """
+    def __init__(self, 
+                 x_dim=2, 
+                 cond_dim=2,
+                 max_horizon=100, 
+                 hidden_dim=128, 
+                 depth=4, 
+                 num_heads=4, 
+                 time_embed_dim=128):
+        super().__init__(x_dim, max_horizon, hidden_dim, depth, num_heads, time_embed_dim)
+        
+        # 2. Time Embedding (Diffusion Time t)
+        self.time_mlp = nn.Sequential(
+            SinusoidalTimeDiffusionEmb(time_embed_dim),
+            nn.Linear(time_embed_dim, time_embed_dim),
+            nn.SiLU(),
+            nn.Linear(time_embed_dim, time_embed_dim),
+        )
 
+    def forward(self, x, cond, t):
+        """
+        x: [Batch, Horizon, Dim] 
+        cond: [Batch, cond_dim]
+        t: [Batch,]
+        """
+        B, H, D = x.shape
+
+        # 调用父类的 forward 方法
+        return super().forward(x, t)
 
     
 

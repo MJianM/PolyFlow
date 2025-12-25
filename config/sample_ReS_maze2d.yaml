@@ -1,0 +1,10 @@
+
+defaults:
+  - sample_diffuser_maze2d
+  - _self_
+
+algo_name: "ReS"
+
+model:
+  sample_cbf_timestep: ${steps}
+  sample_end_timestep: -10

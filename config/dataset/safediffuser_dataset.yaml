@@ -1,0 +1,10 @@
+defaults:
+  - default
+
+
+_target_: SafeDiffuser.diffuser.datasets.sequence.NpzGoalDataset
+data_path: ${file_path} # 数据集文件的相对路径
+action_dim: 0
+obs_dim: ${x_dim}
+horizon: ${max_seq}
+

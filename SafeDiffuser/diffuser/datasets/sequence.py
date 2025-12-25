@@ -1,3 +1,9 @@
+import torch
+import numpy as np
+import os
+from collections import namedtuple
+from .normalization import DatasetNormalizer
+
 # from collections import namedtuple
 # import numpy as np
 # import torch
@@ -8,8 +14,8 @@
 # from .normalization import DatasetNormalizer
 # from .buffer import ReplayBuffer
 
-# # 定义 Batch 命名元组，包含轨迹和条件
-# Batch = namedtuple('Batch', 'trajectories conditions')
+# 定义 Batch 命名元组，包含轨迹和条件
+Batch = namedtuple('Batch', 'trajectories conditions')
 # # 定义 ValueBatch 命名元组，包含轨迹、条件和价值
 # ValueBatch = namedtuple('ValueBatch', 'trajectories conditions values')
 
@@ -186,3 +192,88 @@
 #         # 创建 ValueBatch 对象
 #         value_batch = ValueBatch(*batch, value)
 #         return value_batch
+
+
+class NpzGoalDataset(torch.utils.data.Dataset):
+    def __init__(self, data_path, action_dim, obs_dim, horizon, normalizer='LimitsNormalizer', max_n_episodes=10000):
+        self.action_dim = action_dim
+        self.observation_dim = obs_dim
+        self.horizon = horizon
+        
+        # Load data from .npz file
+        if os.path.exists(data_path):
+            print(f"Loading data from {data_path}")
+            with np.load(data_path) as data:
+                # Expected shape: (num_traj, seq_length, action_dim + obs_dim)
+                self.trajectories = data['traj_dataset']
+        else:
+            print(f"Warning: {data_path} not found. Generating dummy data for demonstration.")
+            # Dummy data generation
+            self.trajectories = np.random.randn(100, 1000, action_dim + obs_dim).astype(np.float32)
+
+        if len(self.trajectories) > max_n_episodes:
+            self.trajectories = self.trajectories[:max_n_episodes]
+
+        # Split into actions and observations
+        # Assuming the format is [actions, observations] in the last dimension
+        self.actions = self.trajectories[:, :, :action_dim]
+        self.observations = self.trajectories[:, :, action_dim:]
+        
+        # Flatten for normalization (Normalizer expects [N, dim])
+        if action_dim == 0:
+            self.actions_flat = self.actions.flatten()
+        else:
+            self.actions_flat = self.actions.reshape(-1, action_dim)
+        self.observations_flat = self.observations.reshape(-1, obs_dim)
+        
+        # Initialize Normalizer
+        data_dict = {
+            'actions': self.actions_flat,
+            'observations': self.observations_flat
+        }
+        self.normalizer = DatasetNormalizer(data_dict, normalizer)
+    
+        # Normalize data and reshape back to (num_traj, seq_length, dim)
+        self.normed_actions = self.normalizer.normalize(self.actions_flat, 'actions').reshape(self.actions.shape)
+        self.normed_observations = self.normalizer.normalize(self.observations_flat, 'observations').reshape(self.observations.shape)
+        
+        # Reconstruct trajectories: [actions, observations]
+        self.normed_trajectories = np.concatenate([self.normed_actions, self.normed_observations], axis=2)
+    
+        # Create indices for sampling sub-trajectories of length `horizon`
+        self.indices = []
+        num_traj, seq_len, _ = self.trajectories.shape
+        for i in range(num_traj):
+            max_start = seq_len - self.horizon
+            if max_start >= 0:
+                for start in range(max_start + 1):
+                    end = start + self.horizon
+                    self.indices.append((i, start, end))
+        
+        print(f"Dataset loaded. Total samples: {len(self.indices)}")
+
+    def __len__(self):
+        return len(self.indices)
+
+    def get_conditions(self, observations):
+        # Condition on start (t=0) and goal (t=horizon-1)
+        # observations shape: (horizon, obs_dim)
+        return {
+            0: observations[0],
+            self.horizon - 1: observations[-1],
+        }
+        # return None
+
+    def __getitem__(self, idx):
+        traj_idx, start, end = self.indices[idx]
+        
+        # Get trajectory segment
+        segment = self.normed_trajectories[traj_idx, start:end]
+        
+        # Extract observations for conditioning (observations are at the end)
+        observations = segment[:, self.action_dim:]
+        
+        conditions = self.get_conditions(observations)
+        
+        # Return Batch namedtuple (trajectories, conditions)
+        return Batch(segment, conditions)

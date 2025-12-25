@@ -140,151 +140,81 @@ class Maze2DEnv:
 
     def Shield(self, x, x_new, t):
         """
-        投影函数，将越界点拉回安全区域
-        策略：顺序遍历每个障碍物，如果点在障碍物内，则沿径向（相对于障碍物中心）投影到表面。
+        投影函数，将越界点拉回最近的安全矩形区域
+        策略：计算点到所有最大可行矩形（Maximal Rectangles）的距离，
+        将其投影到距离最近的那个矩形内部。
         
-        :param x: (batch_size, seq_length, x_dim) 原点 tensor
+        :param x: (batch_size, seq_length, x_dim) 原点 tensor (未使用，仅保持接口一致)
         :param x_new: (batch_size, seq_length, x_dim) 新点 tensor
         :param t: 当前时间步 (batch_size,)（未使用）tensor
         
         返回:
         - x_proj: (batch_size, seq_length, x_dim) 投影后的点
         """
-        device = x_new.device
-        # 克隆数据，避免原地修改影响后续梯度计算（虽然Shield本身不可导，但为了安全）
-        x_proj = x_new.clone()
+
+        # 1. 准备可行矩形边界 Tensor
+        # 为了加速，如果是第一次运行，将 list 转换为 tensor 并缓存
+        if not hasattr(self, '_rect_bounds_tensor'):
+            # valid_rect_bounds 是 list of (x_min, x_max, y_min, y_max)
+            self._rect_bounds_tensor = torch.tensor(
+                self.valid_rect_bounds, 
+                dtype=x_new.dtype, 
+                device=x_new.device
+            )
         
-        # 获取障碍物列表: list of [xc, yc, a, b, n]
-        obstacles = self.maze_obs.get_ellips_list()
-        
-        # 转换为 Tensor 方便计算，或者直接循环处理。
-        # 由于障碍物数量较少（~8个），循环处理每个障碍物可以自然解决重叠问题（虽不是全局最优，但很稳健）
-        # 如果追求极致速度，可以将 obstacles 转为 tensor 进行广播，但在 Shield 中处理重叠比较麻烦。
-        
-        for obs in obstacles:
-            xc, yc, a, b, n = obs
-            
-            # 1. 计算当前点相对于该障碍物中心的偏移
-            dx = x_proj[..., 0] - xc
-            dy = x_proj[..., 1] - yc
-            
-            # 2. 计算超椭圆方程的值 V
-            # V = (|dx|/a)^n + (|dy|/b)^n
-            # 添加 epsilon 避免除零
-            term_x = torch.abs(dx / (a + 1e-6))
-            term_y = torch.abs(dy / (b + 1e-6))
-            
-            # value shape: (batch_size, seq_length)
-            value = torch.pow(term_x, n) + torch.pow(term_y, n)
-            
-            # 3. 找出在障碍物内部的点 (value < 1)
-            # 为了数值稳定性，判定阈值可以设为 0.999 或者 1.0
-            unsafe_mask = value < 1.0
-            
-            if not unsafe_mask.any():
-                continue
-                
-            # 4. 计算缩放因子 scale
-            # 我们希望找到 k 使得 (|k*dx|/a)^n + ... = 1
-            # k^n * value = 1  =>  k = (1 / value)^(1/n)
-            # 注意：只计算 unsafe 的点
-            
-            # 避免 value 为 0 (正好在中心) 导致除零异常
-            safe_value = torch.clamp(value, min=1e-6)
-            scale_factor = torch.pow(1.0 / safe_value, 1.0 / n)
-            
-            # 5. 应用修正
-            # 新位置 = 中心 + 旧偏移 * 缩放因子
-            # 只有 unsafe 的点才会被更新
-            
-            # 这里的逻辑是：如果 unsafe，则投影；否则保持原样 (scale=1 或不更新)
-            # 使用 mask 进行更新
-            
-            # 计算修正后的坐标
-            # 注意：必须使用 mask 索引来只更新特定的点，否则会弄乱 safe 的点
-            
-            # 提取需要修正的 dx, dy
-            dx_unsafe = dx[unsafe_mask]
-            dy_unsafe = dy[unsafe_mask]
-            s_unsafe = scale_factor[unsafe_mask]
-            
-            # 径向投影
-            new_dx = dx_unsafe * s_unsafe
-            new_dy = dy_unsafe * s_unsafe
-            
-            # 更新 x_proj
-            x_proj[unsafe_mask, 0] = xc + new_dx
-            x_proj[unsafe_mask, 1] = yc + new_dy
-            
+        # 确保 tensor 在正确的设备上
+        if self._rect_bounds_tensor.device != x_new.device:
+            self._rect_bounds_tensor = self._rect_bounds_tensor.to(x_new.device)
+
+        rects = self._rect_bounds_tensor  # shape: (K, 4), K 是矩形数量
+
+        # 2. 扩展维度以支持广播 (Broadcasting)
+        # 我们需要计算每个点 (B, S) 到每个矩形 (K) 的距离
+        # x_new shape: (B, S, 2) -> 扩展为 (B, S, 1, 2)
+        pts_expanded = x_new.unsqueeze(-2) 
+
+        # rects shape: (K, 4) -> 分解并扩展为 (1, 1, K)
+        # 这样可以直接让 (B, S, 1) 和 (1, 1, K) 进行运算
+        r_x_min = rects[:, 0].view(1, 1, -1)
+        r_x_max = rects[:, 1].view(1, 1, -1)
+        r_y_min = rects[:, 2].view(1, 1, -1)
+        r_y_max = rects[:, 3].view(1, 1, -1)
+
+        # 3. 计算投影候选点 (Candidates)
+        # 对于每一个点和每一个矩形，计算该点在这个矩形内的最近点（即 Clamp 操作）
+        # pts_x/y shape: (B, S, 1)
+        pts_x = pts_expanded[..., 0]
+        pts_y = pts_expanded[..., 1]
+
+        # clamped_x/y shape: (B, S, K)
+        # 如果点在矩形内，clamp 后坐标不变；如果在矩形外，clamp 会将其拉到矩形边界
+        clamped_x = torch.clamp(pts_x, min=r_x_min, max=r_x_max)
+        clamped_y = torch.clamp(pts_y, min=r_y_min, max=r_y_max)
+
+        # 4. 计算距离并选择最近的矩形
+        # 计算原始点到所有候选投影点的欧氏距离平方
+        # shape: (B, S, K)
+        diff_x = pts_x - clamped_x
+        diff_y = pts_y - clamped_y
+        dist_sq = diff_x**2 + diff_y**2
+
+        # 找到距离最近的矩形索引
+        # min_indices shape: (B, S)
+        min_indices = torch.argmin(dist_sq, dim=-1)
+
+        # 5. 获取最佳投影坐标
+        # 使用 gather 从 (B, S, K) 中根据 min_indices 提取出最佳的 (B, S)
+        # 需要将 indices 扩展维度以匹配 gather 的输入要求
+        gather_indices = min_indices.unsqueeze(-1) # shape: (B, S, 1)
+
+        best_x = torch.gather(clamped_x, 2, gather_indices).squeeze(-1)
+        best_y = torch.gather(clamped_y, 2, gather_indices).squeeze(-1)
+
+        # 6. 组合结果
+        # x_proj shape: (B, S, 2)
+        x_proj = torch.stack([best_x, best_y], dim=-1)
+
         return x_proj
-
-    def GD(self, x, x_new, t, step_size=0.1, num_steps=1):
-        """
-        使用梯度，将越界点拉回安全区域
-        策略：定义 Loss = sum(ReLU(1 - V))，对输入求导并更新。
-        
-        :param x: (batch_size, seq_length, x_dim) 原点 tensor
-        :param x_new: (batch_size, seq_length, x_dim) 新点 tensor
-        :param t: 当前时间步 (batch_size,)（未使用）tensor
-        
-        返回:
-        - x_proj: (batch_size, seq_length, x_dim) 投影后的点
-        """
-        device = x_new.device
-        obstacles = self.maze_obs.get_ellips_list()
-        
-        # 将障碍物参数转为 Tensor 以便进行向量化批处理 (Num_Obs, 5)
-        obs_tensor = torch.tensor(obstacles, device=device, dtype=x_new.dtype)
-        
-        # 提取参数并调整维度以支持广播
-        # shape: (1, 1, Num_Obs, 1)
-        xc = obs_tensor[:, 0].view(1, 1, -1, 1)
-        yc = obs_tensor[:, 1].view(1, 1, -1, 1)
-        a  = obs_tensor[:, 2].view(1, 1, -1, 1)
-        b  = obs_tensor[:, 3].view(1, 1, -1, 1)
-        n  = obs_tensor[:, 4].view(1, 1, -1, 1)
-
-        # 复制并开启梯度
-        x_opt = x_new.detach().clone().requires_grad_(True)
-        
-        for _ in range(num_steps):
-            # 扩展 x_opt 维度: (Batch, Seq, 1, 2)
-            point = x_opt.unsqueeze(2)
-            
-            # 计算 dx, dy
-            dx = point[..., 0:1] - xc
-            dy = point[..., 1:2] - yc
-            
-            # 计算超椭圆方程值 V
-            # V shape: (Batch, Seq, Num_Obs, 1)
-            term_x = torch.pow(torch.abs(dx) / a, n)
-            term_y = torch.pow(torch.abs(dy) / b, n)
-            value = term_x + term_y
-            
-            # 定义 Loss: 我们希望 Value >= 1
-            # 如果 Value < 1 (在内部)，Loss = 1 - Value
-            # 使用 ReLU 截断，Safe 区域 Loss 为 0
-            # 这是一个 Barrier Function
-            violation = torch.relu(1.0 - value)
-            
-            # 总 Loss (对所有障碍物求和)
-            # sum over obstacles (dim=2) and coordinates (dim=3 is 1)
-            loss = violation.sum()
-            
-            # 如果没有违规，提前退出
-            if loss.item() < 1e-6:
-                break
-                
-            # 计算梯度
-            grad = torch.autograd.grad(loss, x_opt)[0]
-            
-            # 梯度下降更新
-            # 注意：Loss 是 (1 - V)，随着我们往外走，V 增大，Loss 减小
-            # 所以我们沿梯度的反方向走 (Gradient Descent)
-            with torch.no_grad():
-                x_opt = x_opt - step_size * grad
-                
-        return x_opt.detach()
 
 
     def _create_binary_map(self):

@@ -51,7 +51,7 @@ class Trainer(object):
         ema_decay=0.995,
         train_batch_size=32,
         train_lr=2e-5,
-        gradient_accumulate_every=2,
+        gradient_accumulate_every=1,
         step_start_ema=2000,
         update_ema_every=10,
         log_freq=100,
@@ -69,6 +69,8 @@ class Trainer(object):
 
         # diffusion_model: 核心的扩散模型
         self.model = diffusion_model
+
+        self.device = next(self.model.parameters()).device
         # ema: EMA更新器
         self.ema = EMA(ema_decay)
         # ema_model: EMA模型，是主模型的深拷贝
@@ -153,7 +155,7 @@ class Trainer(object):
                 # 从数据加载器中获取一个批次的数据
                 batch = next(self.dataloader)
                 # 将数据移动到指定的设备（如GPU）
-                batch = batch_to_device(batch)
+                batch = batch_to_device(batch, device=self.device)
 
                 # 计算损失
                 # batch 是一个 namedtuple，包含 trajectories 和 conditions

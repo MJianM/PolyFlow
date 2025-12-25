@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-import math
+import time
 import tqdm 
 
 import hydra
@@ -107,8 +107,8 @@ def train_worker(cfg: DictConfig):
     seq_length = dataset.seq_length
     x_dim = dataset.x_dim
     eval_samples = cfg.eval.eval_samples
-    generated_traj = sample_worker(cfg, model, dataset, env, n_samples=eval_samples)[-1] # (n_samples, seq_length*x_dim)
-    generated_traj = generated_traj.reshape(eval_samples, seq_length, x_dim)
+    generated_traj, total_time, avg_per_step_time = sample_worker(cfg, model, dataset, env, n_samples=eval_samples) # (n_samples, seq_length*x_dim)
+    generated_traj = generated_traj[-1].reshape(eval_samples, seq_length, x_dim)
     true_traj = dataset.sample_traj_data(n_sample=eval_samples)
     true_traj = true_traj.reshape(eval_samples, seq_length, x_dim)
     env.plot_trajectory_comparison(
@@ -131,6 +131,8 @@ def train_worker(cfg: DictConfig):
         log_dict[key] = value
     for key, value in traj_quality_metrics.items():
         log_dict[key] = value
+    log_dict['TotalTime'] = total_time
+    log_dict['AvgStepTime'] = avg_per_step_time
     log_dict = flatten_metrics(log_dict, check_horizon)
     save_csv_native(log_dict, save_path="final_eval_metrics.csv")
 
@@ -225,7 +227,7 @@ def run_eval(model, val_loader, dataset, env, writer, step_i, cfg, device, log):
         true_traj_np = true_traj.cpu().numpy()
         # 2. 模型采样
         # sample_discrete_delta 返回 numpy array (Steps+1, B, seq_len*x_dim)
-        sampled_traj_np = sample_worker(cfg, model, dataset, env, n_samples=B)
+        sampled_traj_np, total_time, avg_per_step_time = sample_worker(cfg, model, dataset, env, n_samples=B)
         sampled_traj_np = sampled_traj_np[-1] # 取最终采样结果 (B, seq_len*x_dim)
         sampled_traj_np = sampled_traj_np.reshape(B, -1, x_dim) # (B, T, D)
         
@@ -248,13 +250,19 @@ def run_eval(model, val_loader, dataset, env, writer, step_i, cfg, device, log):
         for key, value in traj_quality_metrics.items():
             writer.add_scalar(f'Eval/{key}', value, step_i)
         
+        writer.add_scalar('Eval/TotalTime', total_time, step_i)
+        writer.add_scalar('Eval/AvgStepTime', avg_per_step_time, step_i)
+
         log.info(f"Eval Iter {step_i}: "
                 f"{'MMD='}{np.mean(eval_metrics['mmd']):8.4f} "
                 f"{'W2='}{np.mean(eval_metrics['wasserstein']):8.4f} "
                 f"{'KL='}{np.mean(eval_metrics['kl']):8.4f} "
                 f"{'R='}{traj_quality_metrics['safety_ratio']:8.4f} "
                 f"{'CURVE='}{traj_quality_metrics['curvature_smoothness']:8.4f} "
-                f"{'ACC='}{traj_quality_metrics['acc_smoothness']:8.4f}")
+                f"{'ACC='}{traj_quality_metrics['acc_smoothness']:8.4f} "
+                f"{'TotalTime='}{total_time:8.4f}s "
+                f"{'AvgStepTime='}{avg_per_step_time*1000:8.4f}ms "
+                )
 
     model.train()    
 
@@ -279,34 +287,56 @@ def sample_worker(cfg: DictConfig, model, dataset: TrajDataset, env, n_samples=1
     projection = cfg.sample.get("projection", "none")
 
     if method == "discrete":
-        sampled_traj = sample_discrete_delta(model, dataset, env, n_samples=n_samples, steps=steps)
+        sampled_traj, total_time, avg_per_step_time = sample_discrete_delta(model, dataset, env, n_samples=n_samples, steps=steps)
     elif method == "flow":
-        sampled_traj = sample_flow_matching(model, dataset, env, n_samples=n_samples, steps=steps, projection=projection)
+        sampled_traj, total_time, avg_per_step_time = sample_flow_matching(model, dataset, env, n_samples=n_samples, steps=steps, projection=projection)
     elif method == "diffusion":
-        sampled_traj = sample_diffusion_model(model, dataset, env,n_samples=n_samples, steps=steps, projection=projection)
+        sampled_traj, total_time, avg_per_step_time = sample_diffusion_model(model, dataset, env,n_samples=n_samples, steps=steps, projection=projection)
     elif method == 'safeflow':
-        sampled_traj = sample_safeflow(model, dataset, env, n_samples=n_samples, steps=steps)
+        sampled_traj, total_time, avg_per_step_time = sample_safeflow(model, dataset, env, n_samples=n_samples, steps=steps, cfg=cfg)
     
-    return sampled_traj
+    return sampled_traj, total_time, avg_per_step_time
 
 
 @torch.no_grad()
-def sample_safeflow(model, dataset: TrajDataset, env, n_samples=10, steps=10, projection="none"):
+def sample_safeflow(model, dataset: TrajDataset, env, n_samples=10, steps=10, projection="none", cfg=None):
 
     device = next(model.parameters()).device
     model.eval()
 
     obstacles = env.maze_obs.get_ellips_list()
-    safe_sampler = SafeFlowSampler(model, obstacles=obstacles, device=device)
+
+    if cfg is not None:
+        safe_sampler = SafeFlowSampler(model, obstacles=obstacles, device=device,
+                    clip_u=cfg.sample.clip_u, clip_grad=cfg.sample.clip_grad, slack_penalty=cfg.sample.slack_penalty)
+
+    else:
+        safe_sampler = SafeFlowSampler(model, obstacles=obstacles, device=device)
+
+    # --- 计时开始 ---
+    if device.type == 'cuda':
+        torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+    start_time = time.time()
+    # ----------------
 
     # (n_samples, seq_length, x_dim)
-    gene_traj = safe_sampler.sample(n_samples=n_samples, horizon=dataset.seq_length, steps=500,
-                                    use_cbf=True, use_closed_form=True)
-    # gene_traj = safe_sampler.sample_rk45(n_samples=n_samples, horizon=dataset.seq_length, \
-    #                          atol=0.001, rtol=0.001, use_cbf=True, use_closed_form=True)
+    gene_traj = safe_sampler.sample(n_samples=n_samples, horizon=dataset.seq_length, steps=steps,
+                                    use_cbf=True, use_closed_form=False)
+    # gene_traj = safe_sampler.sample_rk4(n_samples=n_samples, horizon=dataset.seq_length, steps=steps,
+    #                                 use_cbf=True, use_closed_form=False)
     traj_history = [gene_traj.cpu().numpy().reshape(n_samples, -1)]
 
-    return np.array(traj_history)
+    # --- 计时结束 ---
+    if device.type == 'cuda':
+        torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+    end_time = time.time()
+    # ----------------
+
+    # 计算统计数据
+    total_time = end_time - start_time
+    avg_time_per_step = total_time / steps
+
+    return np.array(traj_history), total_time, avg_time_per_step
 
 @torch.no_grad()
 def sample_flow_matching(model, dataset: TrajDataset, env, n_samples=10, steps=10, projection="none"):
@@ -320,6 +350,12 @@ def sample_flow_matching(model, dataset: TrajDataset, env, n_samples=10, steps=1
     # 从纯噪声开始
     x = torch.randn((n_samples, seq_len, x_dim), device=device)
     traj_history = [x.cpu().numpy().reshape(n_samples, -1)]
+
+    # --- 计时开始 ---
+    if device.type == 'cuda':
+        torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+    start_time = time.time()
+    # ----------------
 
     dt = 1.0 / steps
     for i in range(steps):
@@ -340,7 +376,17 @@ def sample_flow_matching(model, dataset: TrajDataset, env, n_samples=10, steps=1
 
         traj_history.append(x.cpu().numpy().reshape(n_samples, -1))
 
-    return np.array(traj_history)
+    # --- 计时结束 ---
+    if device.type == 'cuda':
+        torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+    end_time = time.time()
+    # ----------------
+
+    # 计算统计数据
+    total_time = end_time - start_time
+    avg_time_per_step = total_time / steps
+
+    return np.array(traj_history), total_time, avg_time_per_step
 
 
 @torch.no_grad()
@@ -367,6 +413,12 @@ def sample_discrete_delta(model: PolytopeConstrainedFlowModel, dataset: TrajData
     
     print(f"Sampling with Delta Prediction ({steps} steps)...")
     
+    # --- 计时开始 ---
+    if device.type == 'cuda':
+        torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+    start_time = time.time()
+    # ----------------
+
     for k in range(steps):
         # 构造当前时间 t (归一化到 [0, 1])
         t_curr = torch.ones(n_samples, device=device) * (k / steps)
@@ -380,7 +432,18 @@ def sample_discrete_delta(model: PolytopeConstrainedFlowModel, dataset: TrajData
         # 记录轨迹
         traj_history.append(x.cpu().numpy())
         
-    return np.array(traj_history)
+    # --- 计时结束 ---
+    if device.type == 'cuda':
+        torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+    end_time = time.time()
+    # ----------------
+
+    # 计算统计数据
+    total_time = end_time - start_time
+    avg_time_per_step = total_time / steps
+    
+
+    return np.array(traj_history), total_time, avg_time_per_step
 
 
 

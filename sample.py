@@ -57,8 +57,8 @@ def sample_and_eval(cfg: DictConfig):
     seq_length = dataset.seq_length
     x_dim = dataset.x_dim
     eval_samples = cfg.eval.eval_samples
-    generated_traj = sample_worker(cfg, model, dataset, env, n_samples=eval_samples)[-1] # (n_samples, seq_length*x_dim)
-    generated_traj = generated_traj.reshape(eval_samples, seq_length, x_dim)
+    generated_traj, total_time, avg_per_step_time = sample_worker(cfg, model, dataset, env, n_samples=eval_samples) # (n_samples, seq_length*x_dim)
+    generated_traj = generated_traj[-1].reshape(eval_samples, seq_length, x_dim)
     true_traj = dataset.sample_traj_data(n_sample=eval_samples)
     true_traj = true_traj.reshape(eval_samples, seq_length, x_dim)
     env.plot_trajectory_comparison(
@@ -67,6 +67,14 @@ def sample_and_eval(cfg: DictConfig):
         plot_ellips=cfg.eval.plot_ellips,
         max_plot=cfg.eval.max_plot_traj,
         save_path=f"final_traj_compare.png"
+    )
+    # 保存轨迹
+    np.savez(
+        file="sampled_traj.npz",
+        generated_traj=generated_traj,
+        true_traj=true_traj,
+        seq_length=seq_length,
+        x_dim=x_dim
     )
     # 计算指标
     check_horizon = [0, seq_length // 2, seq_length - 1]
@@ -81,6 +89,8 @@ def sample_and_eval(cfg: DictConfig):
         log_dict[key] = value
     for key, value in traj_quality_metrics.items():
         log_dict[key] = value
+    log_dict['TotalTime'] = total_time
+    log_dict['AvgStepTime'] = avg_per_step_time
     log_dict = flatten_metrics(log_dict, check_horizon)
     save_csv_native(log_dict, save_path="final_eval_metrics.csv")
 

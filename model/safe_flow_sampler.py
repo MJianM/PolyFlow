@@ -7,17 +7,16 @@ import numpy as np
 from tqdm import trange
 from tqdm import tqdm
 
+# 引入 qpth
 try:
-    import cvxpy as cp
-    from cvxpylayers.torch import CvxpyLayer
-    HAS_CVXPYLAYERS = True
+    from qpth.qp import QPFunction
+    HAS_QPTH = True
 except ImportError:
-    HAS_CVXPYLAYERS = False
-    print("Warning: cvxpylayers not found. GPU batch solving will fail.")
-
+    HAS_QPTH = False
+    print("Warning: qpth not installed. QP solving will be skipped.")
 
 class SafeFlowSampler:
-    def __init__(self, model, obstacles, device='cuda'):
+    def __init__(self, model, obstacles, device='cuda', clip_u = 10, clip_grad = 0.5, slack_penalty = 1.0):
         """
         :param model: 训练好的 TrajectoryDiT
         :param obstacles: 列表，每个元素为 [x_c, y_c, a, b, n]
@@ -30,39 +29,15 @@ class SafeFlowSampler:
         self.device = device
         self.model.eval()
         
-        # 初始化 Batch QP Solver
-        if HAS_CVXPYLAYERS:
-            self.init_qp_solver()
+        self.n_obs = len(obstacles)
+        self.x_dim = 2
+        
+        # QP 参数设置
+        self.M_penalty = slack_penalty  # 松弛变量惩罚系数
+        self.qp_eps = 1e-4    # 避免除零或数值不稳的小量
 
-    def init_qp_solver(self):
-        """
-        使用 cvxpy 定义单次 QP 问题结构，CvxpyLayer 会自动处理 Batch 维度
-        """
-        x_dim = 2
-        n_obs = len(self.obstacles)
-        
-        # 定义优化变量 (针对单个样本)
-        u = cp.Variable(x_dim)      # control correction
-        delta = cp.Variable(n_obs)  # slack variables
-        
-        # 定义参数 (这些将在 forward 时传入)
-        # 约束形式: grad^T * u + delta >= lower_bound
-        # 其中 lower_bound = - (grad^T * v + phi * h)
-        param_grad = cp.Parameter((n_obs, x_dim)) # 对应 grad h
-        param_bound = cp.Parameter(n_obs)         # 对应 RHS 下界
-        
-        # 目标函数: min ||u||^2 + M * ||delta||^2
-        # M 取 1e6 保证优先满足约束
-        objective = cp.Minimize(cp.sum_squares(u) + 1.0 * cp.sum_squares(delta))
-        
-        # 约束条件
-        constraints = [
-            param_grad @ u + delta >= param_bound, # CBF 约束 [cite: 247]
-            delta >= 0                             # 松弛变量非负
-        ]
-        
-        problem = cp.Problem(objective, constraints)
-        self.qp_layer = CvxpyLayer(problem, parameters=[param_grad, param_bound], variables=[u, delta])
+        self.clip_u = clip_u
+        self.clip_grad = clip_grad
 
     def get_h_and_grad_tensor(self, x_batch):
         """
@@ -112,7 +87,7 @@ class SafeFlowSampler:
 
         return h_vals, grads
 
-    def phi_function_tensor(self, t, h_vals, gamma=0.0):
+    def phi_function_tensor(self, t, h_vals, gamma=0.9):
         """
         向量化 Blow-up function 
         """
@@ -144,29 +119,106 @@ class SafeFlowSampler:
         grads: [N, n_obs, 2]
         phi_vals: [N, n_obs]
         """
-        if not HAS_CVXPYLAYERS:
+        if not HAS_QPTH:
             return torch.zeros_like(v_nom)
 
-        # 构造 QP 参数
-        # 约束: grad^T * u + delta >= - (grad^T * v + phi * h)
-        # Let bound = - (grad^T * v + phi * h)
+        N = v_nom.shape[0]
+        K = self.n_obs
+        total_vars = 2 + K # [u_x, u_y, delta_1...delta_k]
+
+        # -----------------------------------------------------
+        # 1. 构建 Q (Quadratic Cost Matrix)
+        # -----------------------------------------------------
+        # 目标: min sum(u^2) + M * sum(delta^2)
+        # QPTH 形式: 0.5 * z^T * Q * z
+        # 因此 Q 的对角线应该是 [2, 2, 2M, ..., 2M]
         
-        # grad^T * v: (N, n_obs, 2) * (N, 1, 2) -> sum -> (N, n_obs)
-        lie_deriv = torch.sum(grads * v_nom.unsqueeze(1), dim=-1)
+        Q_diag = torch.cat([
+            torch.tensor([2.0, 2.0], device=self.device),
+            torch.full((K,), 2.0 * self.M_penalty, device=self.device)
+        ])
         
-        # lower_bound: [N, n_obs]
-        param_bound = - (lie_deriv + phi_vals * h_vals)
+        # 扩展到 Batch: (N, 2+K, 2+K)
+        # 注意: qpth 需要 Q 是 PSD (半正定)。加上一点 epsilon 保证数值稳定性
+        Q = torch.diag_embed(Q_diag).unsqueeze(0).expand(N, -1, -1) + \
+            torch.eye(total_vars, device=self.device).unsqueeze(0) * 1e-6
+
+        # -----------------------------------------------------
+        # 2. 构建 p (Linear Cost Vector)
+        # -----------------------------------------------------
+        # 线性项为 0
+        p = torch.zeros(N, total_vars, device=self.device)
+
+        # -----------------------------------------------------
+        # 3. 构建 G 和 h_ineq (Inequality Constraints: Gz <= h)
+        # -----------------------------------------------------
+        # 我们有两组约束:
+        # (1) CBF: -grad^T u - delta <= -B
+        # (2) Slack Positivity: -delta <= 0
         
-        # param_grad: [N, n_obs, 2]
-        param_grad = grads
+        # --- 准备数据 ---
+        # B (lower_bound) = - (grad^T v + phi * h)
+        lie_deriv = torch.sum(grads * v_nom.unsqueeze(1), dim=-1) # (N, K)
+        lower_bound = - (lie_deriv + phi_vals * h_vals) # (N, K)
         
-        # 调用 CvxpyLayer (GPU Batch Solve)
-        # 注意: cvxpylayers 可能会抛出无解异常(Infeasible)，但在我们的松弛变量设置下应该总是有解
+        # 右侧 h_ineq
+        # part 1: -B = -lower_bound = lie_deriv + phi * h
+        # part 2: 0
+        h_part1 = -lower_bound 
+        h_part2 = torch.zeros(N, K, device=self.device)
+        h_ineq = torch.cat([h_part1, h_part2], dim=1) # (N, 2K)
+
+        # 左侧 G 矩阵构建 (N, 2K, 2+K)
+        # 结构:
+        # [ -grads (N, K, 2) | -Identity (N, K, K) ]  <- CBF 约束
+        # [ 0      (N, K, 2) | -Identity (N, K, K) ]  <- Slack 约束
+        
+        I_K = torch.eye(K, device=self.device).unsqueeze(0).expand(N, -1, -1) # (N, K, K)
+        
+        # Block 1 (CBF)
+        G_1_u = -grads # (N, K, 2)
+        G_1_delta = -I_K 
+        G_1 = torch.cat([G_1_u, G_1_delta], dim=2) # (N, K, 2+K)
+        
+        # Block 2 (Slack)
+        G_2_u = torch.zeros(N, K, 2, device=self.device)
+        G_2_delta = -I_K
+        G_2 = torch.cat([G_2_u, G_2_delta], dim=2) # (N, K, 2+K)
+        
+        G = torch.cat([G_1, G_2], dim=1) # (N, 2K, 2+K)
+
+        # -----------------------------------------------------
+        # 4. 求解 QP
+        # -----------------------------------------------------
+        # 定义空的等式约束
+        e = torch.Tensor().to(self.device)
+        
+        # 1. 类型转换：全部转为 float64 (double)
+        # 注意：qpth 在 double 模式下稳定性大幅提升
+        dtype_orig = v_nom.dtype
+        Q = Q.double()
+        p = p.double()
+        G = G.double()
+        h_ineq = h_ineq.double()
+        e = torch.Tensor().double().to(self.device)
+
         try:
-            u_star, delta_star = self.qp_layer(param_grad, param_bound)
-            return u_star # [N, 2]
+            # QPFunction(verbose=False)(Q, p, G, h, A, b)
+            # z shape: (N, 2+K)
+            z = QPFunction(verbose=False, eps=1e-3)(Q, p, G, h_ineq, e, e)
+            
+            # 提取 u (前两个维度)
+            u_star = z[:, :2].to(dtype=dtype_orig)
+            
+            u_norm = torch.norm(u_star, p=2, dim=-1, keepdim=True)
+            max_correction = self.clip_u  # 设定一个经验阈值，比如名义速度的 2-3 倍
+            scale = torch.clamp(max_correction / (u_norm + 1e-6), max=1.0)
+            u_star = u_star * scale
+            return u_star
+
         except Exception as e:
-            print(f"QP Batch Solve Error: {e}")
+            # 遇到无解或数值错误时的 fallback
+            print(f"QP Error: {e}")
             return torch.zeros_like(v_nom)
 
     @torch.no_grad()
@@ -177,7 +229,7 @@ class SafeFlowSampler:
         x = torch.randn(n_samples, horizon, 2).to(self.device)
         dt = 1.0 / steps
         
-        for i in range(steps):
+        for i in trange(steps):
             t_curr = i * dt
             t_tensor = torch.full((n_samples,), t_curr, device=self.device)
             
@@ -195,6 +247,10 @@ class SafeFlowSampler:
                 # 3. 计算 h, grad, phi (全 Tensor 操作)
                 h_vals, grads = self.get_h_and_grad_tensor(x_flat) # [N, n_obs], [N, n_obs, 2]
                 
+                grad_norm = torch.norm(grads, dim=-1, keepdim=True)
+                # 避免除以 0，且限制梯度最大值，防止 QP 矩阵数值爆炸
+                grads = grads / (grad_norm + 1e-6) * torch.clamp(grad_norm, max=self.clip_grad)
+
                 # 简单剪枝: 如果所有障碍物都很远(h > safe_margin)，则不需要解 QP
                 # 为了保持 Batch 维度一致性，通常不剪枝，或者只对 mask 内的解 QP
                 # 这里为了简单直接全解 (cvxpylayers 效率较高)
@@ -216,6 +272,75 @@ class SafeFlowSampler:
             x = x + final_vel * dt
             
         return x
+
+    def solve_cbf_velocity(self, x, t_val, dt, use_cbf=True, use_closed_form=False):
+        """辅助函数：计算 v_nom 并叠加 u_cbf"""
+        t_tensor = torch.full((x.shape[0],), t_val, device=self.device)
+        v_pred = self.model(x, t_tensor)
+        
+        correction = torch.zeros_like(v_pred)
+
+        n_samples = x.shape[0]
+        horizon = x.shape[1]
+        
+        if use_cbf:
+            # 2. 准备 Batch 数据: Flatten (B, H) -> (N)
+            N = n_samples * horizon
+            x_flat = x.view(N, 2)
+            v_flat = v_pred.view(N, 2)
+            
+            # 3. 计算 h, grad, phi (全 Tensor 操作)
+            h_vals, grads = self.get_h_and_grad_tensor(x_flat) # [N, n_obs], [N, n_obs, 2]
+            
+            grad_norm = torch.norm(grads, dim=-1, keepdim=True)
+            # 避免除以 0，且限制梯度最大值，防止 QP 矩阵数值爆炸
+            grads = grads / (grad_norm + 1e-6) * torch.clamp(grad_norm, max=10.0)
+
+            # 简单剪枝: 如果所有障碍物都很远(h > safe_margin)，则不需要解 QP
+            # 为了保持 Batch 维度一致性，通常不剪枝，或者只对 mask 内的解 QP
+            # 这里为了简单直接全解 (cvxpylayers 效率较高)
+            # 实际上只有当 h < 0 或接近 0 时 QP 才会产生非零 u
+            
+            phi_vals = self.phi_function_tensor(t_val, h_vals) # [N, n_obs]
+            
+            # 4. Batch QP 求解
+            if use_closed_form:
+                u_flat = self.solve_batch_closed_form(v_flat, h_vals, grads, phi_vals)
+            else:
+                u_flat = self.solve_qp_batch(v_flat, h_vals, grads, phi_vals)
+            
+            # Reshape back
+            correction = u_flat.view(n_samples, horizon, 2)
+
+        # 5. 更新状态 
+        final_vel = v_pred + correction
+        
+        return final_vel
+
+    @torch.no_grad()
+    def sample_rk4(self, n_samples, horizon, steps=100, use_cbf=True, use_closed_form=False):
+        x = torch.randn(n_samples, horizon, 2).to(self.device)
+        dt = 1.0 / steps
+        
+        for i in trange(steps):
+            t = i * dt
+            
+            # k1
+            v1 = self.solve_cbf_velocity(x, t, dt, use_cbf=use_cbf, use_closed_form=use_closed_form)
+            
+            # k2
+            v2 = self.solve_cbf_velocity(x + 0.5 * dt * v1, t + 0.5 * dt, dt, use_cbf=use_cbf, use_closed_form=use_closed_form)
+            
+            # k3
+            v3 = self.solve_cbf_velocity(x + 0.5 * dt * v2, t + 0.5 * dt, dt, use_cbf=use_cbf, use_closed_form=use_closed_form)
+            
+            # k4
+            v4 = self.solve_cbf_velocity(x + dt * v3, t + dt, dt, use_cbf=use_cbf, use_closed_form=use_closed_form)
+            
+            x = x + (dt / 6.0) * (v1 + 2*v2 + 2*v3 + v4)
+            
+        return x
+
 
     def _runge_kutta_step(self, func, t, x, dt):
         """
@@ -483,7 +608,7 @@ class SafeFlowSampler:
 
 
         u_norm = torch.norm(u_final, dim=-1, keepdim=True)
-        max_u = 1 # 根据迷宫尺度调整，比如设为 max_speed * 2
+        max_u = 2 # 根据迷宫尺度调整，比如设为 max_speed * 2
         clip_mask = u_norm > max_u
         u_final = torch.where(clip_mask, u_final / u_norm * max_u, u_final)
         

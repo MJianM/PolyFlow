@@ -33,13 +33,13 @@ sample:
 # 训练超参数
 train:
   method: "discrete" # discrete, flow, diffusion
-  iteration: 10000 # 训练steps
+  iteration: 100000 # 训练steps
   lr: 1e-4
   batch_size: 50
   steps: ${steps}        # 离散时间步数
   eval_freq: 1000
   log_freq: 100
-  save_freq: 5000
+  save_freq: 10000
   use_ot: true
   use_one_ray: true
   device: ${device}

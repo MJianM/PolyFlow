@@ -1,0 +1,69 @@
+
+
+defaults:
+  - dataset: safediffuser_dataset
+  - env: maze2d
+  - model: diffusion
+  - default
+  - _self_  # 允许主配置覆盖默认值
+
+# 实验名称 (用于文件夹命名)
+env_name: "maze2d"
+algo_name: "diffuser" # diffuser, diffusertrunc, diffuserguide, RoS, RoS_cf, ReS, TVS
+run_name: "sample" # 这次实验的名字
+seed: 42
+device: "cuda:0"
+
+x_dim: 2
+num_cons: 4
+max_seq: 300
+steps: 256 # 离散步数
+
+file_path: "data/large_maze_traj_data_expand_02.npz"
+
+# 采样参数
+sample:
+  method: ${algo_name} # 
+  load_model_path: "outputs/maze2d/safediffuser_train/42_2025-12-25_18-30-07/state_final.pt"
+  steps: ${steps}
+  device: ${device}
+  projection: "none"
+
+model:
+  sample_cbf_timestep: ${steps}
+  sample_end_timestep: 0
+
+
+val_dataloader:
+  batch_size: ${eval.eval_samples}
+  shuffle: true
+
+# # 训练超参数
+# train:
+#   trainer:
+#     _target_: SafeDiffuser.diffuser.utils.training.Trainer
+#     use_condition: false
+#     train_batch_size: ${train.batch_size}
+#     train_lr: ${train.lr}
+#     save_freq: ${train.save_freq}
+#     log_freq: ${train.log_freq}
+#     label_freq: ${train.save_freq}
+#   iteration: 10000
+#   device: ${device}
+#   seed: ${seed}
+#   batch_size: 100
+#   lr: 1e-4
+#   save_freq: 5000
+#   log_freq: 100
+
+
+eval:
+  policy: 
+    _target_: SafeDiffuser.diffuser.guides.policies.Policy
+
+  eval_samples: 200
+  plot_ellips: false
+  max_plot_traj: 5
+
+
+

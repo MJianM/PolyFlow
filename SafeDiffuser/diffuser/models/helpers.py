@@ -7,11 +7,8 @@ import einops
 from einops.layers.torch import Rearrange
 import pdb
 
-from pathlib import Path
-import sys
-parent_parent_dir = Path(__file__).resolve().parent.parent
-sys.path.append(str(parent_parent_dir))
-import diffuser.utils as utils
+
+import SafeDiffuser.diffuser.utils as utils
 
 #-----------------------------------------------------------------------------#
 #---------------------------------- modules ----------------------------------#

@@ -6,12 +6,8 @@ from torch.autograd import Variable
 from qpth.qp import QPFunction, QPSolvers
 import einops
 
-from pathlib import Path
-import sys
-parent_parent_dir = Path(__file__).resolve().parent.parent
-sys.path.append(str(parent_parent_dir))
-import diffuser.utils as utils
-from diffuser.models.helpers import (
+import SafeDiffuser.diffuser.utils as utils
+from SafeDiffuser.diffuser.models.helpers import (
     cosine_beta_schedule,
     extract,
     apply_conditioning,
@@ -91,7 +87,7 @@ def mean_flat(tensor):
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 class GaussianDiffusion(nn.Module):
-    def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000,
+    def __init__(self, model_none, horizon, observation_dim, action_dim, n_timesteps=1000,
         loss_type='l1', clip_denoised=False, predict_epsilon=True,
         action_weight=1.0, loss_discount=1.0, loss_weights=None,
     ):
@@ -101,7 +97,7 @@ class GaussianDiffusion(nn.Module):
         self.observation_dim = observation_dim
         self.action_dim = action_dim
         self.transition_dim = observation_dim + action_dim
-        self.model = model
+        self.model = model_none
         self.norm_mins = 0
         self.norm_maxs = 0
 
@@ -1355,7 +1351,7 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     添加了安全修正机制 (Invariance / CBF)。
     """
     def __init__(self, 
-                 model, 
+                 model_bone, 
                  horizon, 
                  observation_dim, 
                  action_dim, 
@@ -1366,8 +1362,10 @@ class SafeGaussianDiffusion(GaussianDiffusion):
                  action_weight=1, loss_discount=1, loss_weights=None,
                  ellips_list=None,
                  safe_method='truncate', # truncate, classifier_guidance, invariance, invariance_relax
+                 sample_end_timestep=0,
+                 sample_cbf_timestep=None,
                  ):
-        super().__init__(model, 
+        super().__init__(model_bone, 
                          horizon, 
                          observation_dim, 
                          action_dim, 
@@ -1377,7 +1375,10 @@ class SafeGaussianDiffusion(GaussianDiffusion):
                          predict_epsilon, 
                          action_weight, loss_discount, loss_weights)
         
-        assert safe_method in ['none', 'truncate', 'classifier_guidance', 'RoS', 'RoS_cf', 'ReS', 'TVS']
+        assert safe_method in ['diffuser', 'diffusertrunc', 'diffuserguide', 'RoS', 'RoS_cf', 'ReS', 'TVS']
+
+        assert sample_end_timestep <= 0
+        assert sample_cbf_timestep is None or sample_cbf_timestep > 0
 
         # 保存未经过归一化的障碍物列表 [(xc, yc, a, b, n)]
         self.ellips_list = ellips_list
@@ -1385,6 +1386,10 @@ class SafeGaussianDiffusion(GaussianDiffusion):
 
         self.cbfs = [0 for _ in range(len(ellips_list))]  # 用于记录每个障碍物的h值
 
+        self.sample_end_timestep = sample_end_timestep
+        self.sample_cbf_timestep = sample_cbf_timestep
+        if self.sample_cbf_timestep is None:
+            self.sample_cbf_timestep = self.n_timesteps + 1
 
     def get_normalize_obstacles(self, ellips_list):
         """
@@ -1529,13 +1534,21 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         
         # 展开目标函数：1/2 ||u - u_ref||^2 = 1/2 (u^T I u - 2 u^T u_ref + const)
         # 对应标准型：1/2 u^T Q u + q^T u
-        Q = torch.eye(2).unsqueeze(0).expand(n_steps, 2, 2).to(x.device)
+        Q = torch.eye(2).unsqueeze(0).expand(n_steps, 2, 2).to(x.device) + \
+            torch.eye(2, device=x.device).unsqueeze(0) * 1e-6
         q = -torch.stack([u_ref_x, u_ref_y], dim=1).to(x.device)
         
         e = Variable(torch.Tensor())
 
+        dtype_ori = x.dtype
         try:
-            u_optimal = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED)(Q, q, G, h, e, e)
+            
+            Q = Q.double()
+            q = q.double()
+            G = G.double()
+            h = h.double()
+            e = e.double()
+            u_optimal = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(Q, q, G, h, e, e)
         
             # 检查是否包含 NaN
             if torch.isnan(u_optimal).any():
@@ -1546,8 +1559,8 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             return self.Shield(x, xp1)
 
         rt = x_pred.clone()
-        rt[:, idx_x] = x_curr[:, idx_x] + u_optimal[:, 0]
-        rt[:, idx_y] = x_curr[:, idx_y] + u_optimal[:, 1]
+        rt[:, idx_x] = x_curr[:, idx_x] + u_optimal[:, 0].to(dtype=dtype_ori)
+        rt[:, idx_y] = x_curr[:, idx_y] + u_optimal[:, 1].to(dtype=dtype_ori)
 
         rt = rt.reshape(xp1.shape)
         return rt
@@ -1664,7 +1677,7 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         
         # 确定松弛权重 (遵循原代码逻辑)
         # 当 t 较大时开启松弛 (sign > 0)，允许变量 xi 调节约束
-        sign = torch.where(t >= 10, torch.full_like(t, 100.0), torch.full_like(t, 1.0)) 
+        sign = torch.where(t >= 0, torch.full_like(t, 1.0), torch.full_like(t, 0.0)) 
 
         # 初始化大矩阵
         # 变量总数 = 2 (ux, uy) + n_obs (每个障碍物一个松弛变量)
@@ -1685,6 +1698,11 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             # 3. 计算梯度 (Lie Derivative)
             Lgbu_x = obs['n'] * torch.abs(dx_n)**(obs['n']-1) * torch.sign(dx_n) / obs['a']
             Lgbu_y = obs['n'] * torch.abs(dy_n)**(obs['n']-1) * torch.sign(dy_n) / obs['b']
+            grad = torch.concatenate([Lgbu_x.unsqueeze(1), Lgbu_y.unsqueeze(1)], dim=1)
+            grad_norm = torch.norm(grad, dim=1, keepdim=True)
+            # grad = grad / (grad_norm + 1e-6) * torch.clamp(grad_norm, max=1.0)
+            Lgbu_x = grad[:, 0]
+            Lgbu_y = grad[:, 1]
 
             k = 1.0
 
@@ -1695,7 +1713,9 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             # 只有对应当前障碍物索引 i 的松弛列填入 sign
             G_row = torch.zeros(n_steps, n_vars).to(x.device)
             G_row[:, 0] = -Lgbu_x
+            # G_row[:, 0] = -grad[:, 0]
             G_row[:, 1] = -Lgbu_y
+            # G_row[:, 1] = -grad[:, 1]
             G_row[:, 2 + i] = sign 
             
             all_G.append(G_row.unsqueeze(1))
@@ -1707,8 +1727,8 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         
         # 5. 构建 QP 目标函数
         # 目标：min 1/2 * (ux^2 + uy^2 + xi_1^2 + ... + xi_n^2) + q^T * z
-        # Q 矩阵为单位阵 (4x4 或更高维)
-        Q = torch.eye(n_vars).unsqueeze(0).expand(n_steps, n_vars, n_vars).to(x.device)
+        Q = torch.eye(n_vars).unsqueeze(0).expand(n_steps, n_vars, n_vars).to(x.device) + \
+            1e-4 * torch.eye(n_vars, device=x.device).unsqueeze(0)
         
         # q 向量：[-u_ref_x, -u_ref_y, 0, ..., 0]
         q_vec = torch.zeros(n_steps, n_vars).to(x.device)
@@ -1716,13 +1736,18 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         q_vec[:, 1] = -ref[:, idx_y]
         
         # 6. 求解 QP 问题
-        e = Variable(torch.Tensor())
-        out = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED)(Q, q_vec, G, h, e, e)
+        dtype_orig = x.dtype
+        Q = Q.double()
+        q_vec = q_vec.double()
+        G = G.double()
+        h = h.double()
+        e = Variable(torch.Tensor().double().to(x.device))
+        out = QPFunction(verbose=True, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(Q, q_vec, G, h, e, e)
 
         # 7. 提取位移修正量并应用 (前两维)
         rt = x_pred.clone()      
-        rt[:, idx_x] = x_curr[:, idx_x] + out[:, 0]
-        rt[:, idx_y] = x_curr[:, idx_y] + out[:, 1]
+        rt[:, idx_x] = x_curr[:, idx_x] + out[:, 0].to(dtype=dtype_orig)
+        rt[:, idx_y] = x_curr[:, idx_y] + out[:, 1].to(dtype=dtype_orig)
 
         rt = rt.reshape(xp1.shape)
         return rt
@@ -1760,7 +1785,7 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         sig_val = torch.sigmoid(sig_input)
         
         # Gamma 定义
-        gamma_scale = 20.0
+        gamma_scale = 5.0
         gamma = - gamma_scale * sig_val
         Lfb = (gamma_scale / T_temp) * sig_val * (1 - sig_val)
         
@@ -1804,16 +1829,23 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         ref_x = x_pred[:, idx_x] - x_curr[:, idx_x]
         ref_y = x_pred[:, idx_y] - x_curr[:, idx_y]
         q = -torch.stack([ref_x, ref_y], dim=1).to(G.device)
-        Q = torch.eye(2).unsqueeze(0).expand(n_total, 2, 2).to(G.device)
+        Q = torch.eye(2).unsqueeze(0).expand(n_total, 2, 2).to(G.device) + \
+            torch.eye(2, device=G.device).unsqueeze(0) * 1e-4
         
         e = Variable(torch.Tensor())
         # 批量求解 QP：qpth 会并行处理 B*H 个二次规划问题
-        out = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED)(Q, q, G, h, e, e)
+        dtype_ori = x.dtype
+        Q = Q.double()
+        q = q.double()
+        G = G.double()
+        h = h.double()
+        e = e.double()
+        out = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(Q, q, G, h, e, e)
         
         # 将修正后的结果重新 View 回原始形状
         rt = xp1.clone().view(B * H, D)
-        rt[:, idx_x] = x_curr[:, idx_x] + out[:, 0]
-        rt[:, idx_y] = x_curr[:, idx_y] + out[:, 1]
+        rt[:, idx_x] = x_curr[:, idx_x] + out[:, 0].to(dtype=dtype_ori)
+        rt[:, idx_y] = x_curr[:, idx_y] + out[:, 1].to(dtype=dtype_ori)
         
         return rt.view(B, H, D)
     
@@ -1839,20 +1871,27 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         # 2. 计算无约束的下一步状态 xp1 (mean + noise)
         xp1 = model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
-        if self.safe_method == 'none':
+        if self.safe_method == 'diffuser':
             x = xp1
-        elif self.safe_method == 'truncate':
+        elif self.safe_method == 'diffusertrunc':
             x = self.Shield(x, xp1)
-        elif self.safe_method == 'classifier_guidance':
+        elif self.safe_method == 'diffuserguide':
             x = self.GD(x, xp1)
         elif self.safe_method == 'RoS':
-            x = self.invariance(x, xp1)
-        elif self.safe_method == 'RoS_cf':
-            x = self.invariance_cf_multi(x, xp1)
+            if t[0] <= self.sample_cbf_timestep:
+                x = self.invariance(x, xp1)
+            else:
+                x = xp1
         elif self.safe_method == 'ReS':
-            x = self.invariance_relax(x, xp1, t)
+            if t[0] <= self.sample_cbf_timestep:
+                x = self.invariance_relax(x, xp1, t)
+            else:
+                x = xp1
         elif self.safe_method == 'TVS':
-            x = self.invariance_time(x, xp1, t)
+            if t[0] <= self.sample_cbf_timestep:
+                x = self.invariance_time(x, xp1, t)
+            else:
+                x = xp1
         else:
             raise ValueError(f"Unknown safe_method: {self.safe_method}")
 
@@ -1942,7 +1981,7 @@ class SafeGaussianDiffusion(GaussianDiffusion):
 
         progress = utils.Progress(self.n_timesteps) if verbose else utils.Silent()
         # 逆向扩散过程
-        for i in reversed(range(0, self.n_timesteps)):  #-50 change here for the number of diffusion steps,
+        for i in reversed(range(self.sample_end_timestep, self.n_timesteps)):  #-50 change here for the number of diffusion steps,
             if i < 0:
                 i = 0
             timesteps = torch.full((batch_size,), i, device=device, dtype=torch.long)

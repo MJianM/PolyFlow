@@ -3,12 +3,10 @@ from collections import namedtuple
 import torch
 import einops
 import pdb
+import time
 
-from pathlib import Path
-import sys
-parent_parent_dir = Path(__file__).resolve().parent.parent
-sys.path.append(str(parent_parent_dir))
-import diffuser.utils as utils
+
+import SafeDiffuser.diffuser.utils as utils
 # from diffusion.datasets.preprocessing import get_policy_preprocess_fn
 
 Trajectories = namedtuple('Trajectories', 'actions observations')
@@ -56,7 +54,25 @@ class Policy:
         ## run reverse diffusion process
         self.diffusion_model.norm_mins = self.normalizer.normalizers['observations'].mins
         self.diffusion_model.norm_maxs = self.normalizer.normalizers['observations'].maxs
+        
+        # --- 计时开始 ---
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+        start_time = time.time()
+        # ----------------
+        
         sample, diffusion = self.diffusion_model(conditions, batch_size)
+
+        # --- 计时结束 ---
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+        end_time = time.time()
+        # ----------------
+
+
+        # 计算统计数据
+        total_time = end_time - start_time
+        avg_time_per_step = total_time / (self.diffusion_model.n_timesteps + self.diffusion_model.sample_end_timestep)
 
         #if get elbo/NLL####################################################for elbo/NLL
         # import pickle
@@ -120,6 +136,6 @@ class Policy:
         # observations = np.concatenate([observation_np[:,None], next_observations], axis=1)
 
         trajectories = Trajectories(actions, observations)
-        return action, trajectories, diffusions, sum_elbo
+        return action, trajectories, diffusions, sum_elbo, total_time, avg_time_per_step
         # else:
         #     return action
