@@ -1,0 +1,12 @@
+defaults:
+  - default
+
+_target_: src.datasets.dataset.MinariSequenceDataset
+env: ${dataset_minari_name}
+horizon: ${horizon}
+normalizer: 'GaussianNormalizer'
+preprocess_fns: []
+max_path_length: ${max_seq}
+max_n_episodes: 10000
+termination_penalty: 0
+use_padding: true

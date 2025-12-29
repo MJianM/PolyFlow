@@ -1,6 +1,0 @@
-defaults:
-  - default
-
-
-_target_: utils.dataset.BoxConsTrajDataset
-file_path: ${file_path} # 相对路径

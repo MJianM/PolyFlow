@@ -1,0 +1,6 @@
+defaults:
+  - default
+
+
+_target_: src.env.hopper.HopperEnv
+height_limit: 1.5

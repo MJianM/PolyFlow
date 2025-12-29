@@ -1,8 +1,0 @@
-defaults:
-  - default
-
-
-_target_: env.maze2d_env.Maze2DEnv
-obs_expand_dis: 0.2
-ellips_n: 4
-alpha: 0.5

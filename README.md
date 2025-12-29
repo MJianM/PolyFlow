@@ -1,26 +1,42 @@
+# PolyFlow
 
+## 框架介绍
 
-# Poly-Flow
-
-## 依赖安装
-项目依赖 `python==3.10`
-```
-pip install -r requirements.txt
-```
+* env: 环境交互类
+* dataset: 数据集类
+* backbone: 模型架构
+* algorithm: 方法类（diffusion, flow）
+* trainer: 训练类
+* policy: 策略类
 
 ## 如何运行？
 
-* 如果想训练模型, 运行下面指令
-```
-python train.py --config-name="train_oneray_maze2d.yaml" device="cuda:0"
-```
-所有训练参数放在 config 中的 yaml 文件内
-
-所有训练过程的日志，模型文件和评估指标放在 outputs 文件夹内
-
-* 如果只想跑采样过程，运行下面指令
-```
-python sample.py --config-name="sample_safeflow_maze2d.yaml" device="cuda:0"
+### diffusion
+* 训练 diffusion 
+```bash
+python train_diffusion.py --config-name=train_diffusion_hopper.yaml
 ```
 
-同样地，采样的评估指标放在 outputs 文件夹内。
+* 训练 diffusion classifier
+```bash
+python train_diffusion_value.py --config-name=train_diffusion_value_hopper.yaml
+```
+
+* 采样
+```bash
+python sample_diffusion.py --config-name=sample_diffusion_hopper.yaml
+```
+
+* guided 采样
+```bash
+python sample_diffusion_guide.py --config-name=sample_diffusion_guide_hopper.yaml
+```
+
+### flow
+* 训练 flow
+```bash
+python train_flow.py --config-name=train_flow_hopper.yaml
+```
+
+# Acknowledgements
+The diffusion model implementation and organization are based on Michael Janner's diffuser repo: https://github.com/jannerm/diffuser

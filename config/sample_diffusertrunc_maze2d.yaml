@@ -1,8 +1,0 @@
-
-defaults:
-  - sample_diffuser_maze2d
-  - _self_
-
-algo_name: "diffusertrunc"
-
-

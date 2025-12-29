@@ -1,0 +1,16 @@
+defaults:
+  - default
+
+
+_target_: src.models.diffusion.GaussianDiffusion
+# model: ??
+horizon: ${horizon}
+observation_dim: ${obs_dim}
+action_dim: ${act_dim}
+n_timesteps: ${steps}
+loss_type: 'l2'
+clip_denoised: false
+predict_epsilon: false
+action_weight: 10.0
+loss_discount: 1.0
+loss_weights: null

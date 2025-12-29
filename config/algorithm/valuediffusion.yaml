@@ -1,0 +1,6 @@
+defaults:
+  - diffusion
+
+
+_target_: src.models.diffusion.ValueDiffusion
+loss_type: 'value_l2'

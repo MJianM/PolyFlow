@@ -1,0 +1,11 @@
+defaults:
+  - default
+
+
+_target_: src.models.temporal.TemporalUnet
+horizon: ${horizon}
+transition_dim: ${transition_dim}
+cond_dim: ${cond_dim}
+dim: 32
+dim_mults: [1, 2, 4, 8]
+attention: false

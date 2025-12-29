@@ -1,0 +1,10 @@
+defaults:
+  - default
+  - sequence
+  - _self_
+
+_target_: src.datasets.dataset.ValueDataset
+
+discount: 0.99
+normed: false
+termination_penalty: -100
