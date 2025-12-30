@@ -42,3 +42,5 @@ cond_dim: 11
 steps: 20  # diffusion 扩散步
 
 iteration: 200000  # 训练step
+
+height_limit: 1.5

@@ -10,31 +10,24 @@ from tqdm import trange
 class HopperEnv:
     def __init__(
             self,
-            height_limit: float = 1.5
+            height_limit: float = 1.5,
+            use_cpx: bool = False,
+            vel_scale: float = 0.05,
     ):
 
         self.env = gymnasium.make("Hopper-v5", render_mode="rgb_array")
         self.height_limit = height_limit
-
+        self.use_cpx = use_cpx # 是否使用复杂约束
+        self.vel_scale = vel_scale
+        print(f"Env Hopper use complex constraints: {self.use_cpx}")
 
         # [新增] 保存初始状态，用于在绘图函数中通过观测值还原环境状态
         self.env.reset()
         self.init_qpos = self.env.unwrapped.data.qpos.ravel().copy()
         self.init_qvel = self.env.unwrapped.data.qvel.ravel().copy()
 
-        # # 4. 计算 像素-物理 缩放比例 (Calibration)
-        # frame = self.env.render()
-        # self.frame_h, self.frame_w, _ = frame.shape
-        
-        # # Hopper 默认垂直 FOV 为 45 度
-        # fovy_deg = 45.0 
-        # # 视野物理高度 = 2 * d * tan(fov/2)
-        # view_height_m = 2 * self.cam_distance * np.tan(np.deg2rad(fovy_deg) / 2)
-        
-        # # pixels_per_meter: 每米对应多少个像素
-        # self.pixels_per_meter = self.frame_h / view_height_m
 
-    def safety_check(self, traj_obs: np.array) -> np.ndarray:
+    def safety_check(self, traj_obs: np.array, ignore_first_horizon=True, eps=5e-2) -> np.ndarray:
         """
         检查轨迹是否满足高度限制约束。
         
@@ -47,10 +40,21 @@ class HopperEnv:
         # heights 形状变为: [B, H]
         heights = traj_obs[:, :, 0]
 
+        # 提取速度信息
+        vels = traj_obs[:, :, 6]
+
         # 2. 检查约束
         # 我们需要整条轨迹的所有点都满足 height < height_limit
         # axis=1 表示沿着时间步(Horizon)方向进行逻辑与(AND)操作
-        is_safe = np.all(heights < self.height_limit, axis=1)
+        if ignore_first_horizon:
+            # horizon=0 时刻不检查
+            heights = heights[:, 1:]
+            vels = vels[:, 1:]
+
+        if self.use_cpx:
+            is_safe = np.all(heights + self.vel_scale * vels <= self.height_limit + eps, axis=1)
+        else:
+            is_safe = np.all(heights <= self.height_limit + eps, axis=1)
         
         return is_safe
     
@@ -151,7 +155,7 @@ class HopperEnv:
         unsafe_cnt = 0
         total_traj = len(obs_traj_list)
         for obs_traj in obs_traj_list:
-            flag = self.safety_check(obs_traj.reshape(1, -1, obs_dim))[0]
+            flag = self.safety_check(obs_traj.reshape(1, -1, obs_dim), ignore_first_horizon=False)[0]
             if not flag:
                 unsafe_cnt += 1
         

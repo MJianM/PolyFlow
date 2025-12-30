@@ -1,0 +1,23 @@
+defaults:
+  - default
+
+
+_target_: src.models.partial_polyflow_block.PartiallyConstrainedFlowModel
+full_x_dim: ${transition_dim}
+constrained_idxs: ${full_constrained_idxs}
+num_cons: ${num_cons}
+max_seq: ${horizon}
+embed_dim: 128
+share_traj_encoder: true
+cons_begin_seq_idx: 1  # 第一个索引是condition
+num_rays: 1
+num_heads_cons: 4
+num_layers_cons: 2
+num_heads_weight: 4
+num_layers_weight: 2
+num_heads_traj: 4
+num_layers_traj: 4
+time_embed_scale: 1000
+use_block_mask_cons: true
+use_block_mask_cross: true
+device: ${device}

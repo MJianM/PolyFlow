@@ -117,7 +117,12 @@ class Trainer(object):
                 batch = next(self.dataloader)
                 batch = batch_to_device(batch, device=self.device)
 
-                loss, infos = self.model.loss(*batch)
+                # 如果是 poly 约束，从dataset中采样初始分布
+                if hasattr(self.dataset, "raw_A"):
+                    x0, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0], device=self.device)
+                    loss, infos = self.model.loss(*batch, x0)
+                else:
+                    loss, infos = self.model.loss(*batch)
                 loss = loss / self.gradient_accumulate_every
                 loss.backward()
 

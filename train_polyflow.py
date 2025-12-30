@@ -68,7 +68,9 @@ def train_worker(cfg: DictConfig):
         results_folder=".",
     )
 
-    trainer.train(n_train_steps=cfg.iteration, use_cosine_scheduler=True, writer=writer)
+    trainer.train(n_train_steps=cfg.iteration, 
+                  use_cosine_scheduler=True, writer=writer,
+                  use_grad_clip=True, grad_clip_norm=1.0)
     log.info("Training completed.")
     trainer.save("final")
     
@@ -76,7 +78,7 @@ def train_worker(cfg: DictConfig):
     log.info("Starting evaluation...")
 
 
-    policy = instantiate(cfg.policy, guide=None, diffusion_model=algo, normalizer=dataset.normalizer)
+    policy = instantiate(cfg.policy, guide=None, diffusion_model=algo, normalizer=dataset.normalizer, dataset=dataset)
     
     batch = next(iter(val_loader))
     true_joint_normed = batch.trajectories # [B, H, A+O]
@@ -164,7 +166,7 @@ def train_worker(cfg: DictConfig):
     save_csv_native(log_dict, save_path="final_eval_metrics.csv")
 
 
-@hydra.main(config_path="config", config_name="train_flow_hopper.yaml")
+@hydra.main(config_path="config", config_name="train_polyflow_hoppercpx.yaml")
 def main(cfg: DictConfig):
 
     if "seed" in cfg:

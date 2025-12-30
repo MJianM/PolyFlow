@@ -46,16 +46,22 @@ def make_timesteps(batch_size, i, device):
 class GaussianDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000,
         loss_type='l1', clip_denoised=False, predict_epsilon=True,
-        action_weight=1.0, loss_discount=1.0, loss_weights=None,
+        action_weight=1.0, loss_discount=1.0, loss_weights=None, env_name='hopper_cpx', safe_method='RoS'
     ):
         super().__init__()
-        self.mean = 0  # for normalization
-        self.std = 0
+        self.means = 0  # for normalization
+        self.stds = 0
         self.horizon = horizon
         self.observation_dim = observation_dim
         self.action_dim = action_dim
         self.transition_dim = observation_dim + action_dim
         self.model = model
+
+        self.env_name = env_name
+        self.safe_method = safe_method
+        assert self.safe_method in ['RoS', 'RoS_cf', 'GD', 'Shield', 'none']
+        assert self.env_name in ['hopper', 'hopper_cpx']
+        print(f"Env name: {self.env_name}  Safe method: {self.safe_method}")
 
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
@@ -174,6 +180,22 @@ class GaussianDiffusion(nn.Module):
             x_t = x.clone()
             x, values = sample_fn(self, x, cond, t, **sample_kwargs)
 
+
+            if self.env_name == 'hopper_cpx':
+                if self.safe_method == 'RoS_cf':
+                    x, b_min = self.invariance_hopper_cpx_cf_batch(x_t, x)
+                elif self.safe_method == 'RoS':
+                    x, b_min = self.invariance_hopper_cpx_batch(x_t, x)
+                elif self.safe_method == 'GD':
+                    x, b_min = self.GD_hopper_cpx_batch(x_t, x)
+            elif self.env_name == 'hopper':
+                if self.safe_method == 'RoS_cf':
+                    x, b_min = self.invariance_hopper_cf_batch(x_t, x)
+                elif self.safe_method == 'RoS':
+                    x, b_min = self.invariance_hopper_batch(x_t, x)
+                elif self.safe_method == 'Shield':
+                    x, b_min = self.Shield_hopper_batch(x_t, x)
+
             ##########################################walker2d
             # x, b_min = self.GD(x_t, x)  # truncate method
             # x, b_min = self.Shield(x_t, x)  # classifier guidance or potential-based method
@@ -189,6 +211,7 @@ class GaussianDiffusion(nn.Module):
             # x, b_min = self.invariance_hopper_cf(x_t, x)   #RoS diffuser, closed form
             # x, b_min = self.invariance_hopper_cpx(x_t, x)  #RoS diffuser with complex specification
             # x, b_min = self.invariance_hopper_cpx_cf(x_t, x)  #RoS diffuser with complex specification, closed form
+
 
             ##########################################cheetah
             # x, b_min = self.invariance_cheetah(x_t, x)
@@ -609,6 +632,272 @@ class GaussianDiffusion(nn.Module):
         rt = rt.unsqueeze(0)
         return rt, torch.min(b)   # + 0.01  # for robustness
 
+
+    @torch.no_grad()   # 仅用于采样
+    def invariance_hopper_batch(self, x, xp1):   # RoS diffuser (hopper)
+        """
+        支持任意 Batch Size 的版本。
+        输入形状: x, xp1 -> (Batch, Horizon, Dim)
+        """
+        # 1. 获取维度信息
+        batch_size, horizon, dim = x.shape
+        
+        # 2. 展平 (Flatten) 操作
+        # 将 (Batch, Horizon, Dim) -> (Batch * Horizon, Dim)
+        # 这样我们可以把每一个时间步都看作一个独立的优化问题，利用 QP 求解器的并行能力
+        x_flat = x.reshape(-1, dim)
+        xp1_flat = xp1.reshape(-1, dim)
+
+        # 这里 nBatch 实际上是总的优化问题数量 (Total QP Problems = B * H)
+        n_total = x_flat.shape[0]  
+        
+        # 计算参考控制量 (u_ref)
+        ref = xp1_flat - x_flat
+
+        # 归一化障碍物高度
+        # TODO: 检查归一化索引是否对应
+        height = 1.5
+        height = (height - self.means[0]) / self.stds[0]
+
+        # 3. 构建 CBF (基于展平后的数据)
+        # b 的形状: (B*H, 1)
+        b = height - x_flat[:, 3:4] 
+        
+        Lfb = 0 
+        Lgbu1 = -1 * torch.ones_like(x_flat[:, 3:4])
+  
+        # CBF: \dot{b} + alpha(b) >= 0
+        # Lfb + Lgbu1^T * u + k * b >= 0
+        # -Lgbu1^T * u <= Lfb + k * b
+
+        # G 的形状: (B*H, 1) -> (B*H, 1, 1) 适配 QP 求解器
+        G = torch.cat([-Lgbu1], dim=1)
+        G = G.unsqueeze(1)
+        k = 1
+        h = Lfb + k * b
+        
+        # 4. 构建 QP 矩阵
+        # q 的形状: (B*H, 1)
+        q = -torch.cat([ref[:, 3:4]], dim=1).to(G.device)
+        
+        # Q 的形状: (B*H, 1, 1)
+        # 为每一个优化问题构建一个单位矩阵
+        Q = Variable(torch.eye(1))
+        Q = Q.unsqueeze(0).expand(n_total, 1, 1).to(G.device)
+        
+        e = Variable(torch.Tensor())
+        
+        # 求解 QP
+        # out 的形状: (B*H, 1)
+        out = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED)(Q, q, G, h, e, e)
+
+        # 5. 应用修正
+        rt_flat = xp1_flat.clone()
+        rt_flat[:, 3:4] = x_flat[:, 3:4] + out[:, 0:1]
+        
+        # 6. 还原形状 (Reshape back)
+        # (B*H, Dim) -> (Batch, Horizon, Dim)
+        rt = rt_flat.reshape(batch_size, horizon, dim)
+        
+        # 返回修正后的轨迹和全局最小安全值（用于监控）
+        return rt, torch.min(b)
+
+    @torch.no_grad()   # 仅用于采样
+    def invariance_hopper_cf_batch(self, x, xp1):  # RoS diffuser closed form (hopper)
+        """
+        闭式解 (Closed-Form) 的任意 Batch Size 版本
+        """
+        batch_size, horizon, dim = x.shape
+        
+        # 展平: (Batch, Horizon, Dim) -> (Batch * Horizon, Dim)
+        x_flat = x.reshape(-1, dim)
+        xp1_flat = xp1.reshape(-1, dim)
+        
+        ref = xp1_flat - x_flat
+
+        # 归一化
+        height = 1.5
+        height = (height - self.means[0]) / self.stds[0]
+
+        # CBF 定义
+        b = height - x_flat[:, 3:4]
+        Lfb = 0 
+        Lgbu1 = -1 * torch.ones_like(x_flat[:, 3:4])
+  
+        # 约束 0
+        G0 = torch.cat([-Lgbu1], dim=1)
+        k = 1
+        h0 = Lfb + k * b
+
+        # 约束 1
+        Lgbu1_pos = 1 * torch.ones_like(x_flat[:, 3:4])
+        G1 = torch.cat([-Lgbu1_pos], dim=1)
+        h1 = Lfb + k * (x_flat[:, 3:4] + 10)
+        
+        q = -torch.cat([ref[:, 3:4]], dim=1).to(G0.device)
+
+        # KKT 解析解求解
+        # 所有变量形状第一维均为 (B*H)
+        y1_bar = 1 * G0
+        y2_bar = 1 * G1
+        u_bar = -1 * q
+        
+        p1_bar = h0 - torch.sum(G0 * u_bar, dim=1).unsqueeze(1)
+        p2_bar = h1 - torch.sum(G1 * u_bar, dim=1).unsqueeze(1)
+
+        # 计算 Gram 矩阵元素
+        G = torch.cat([
+            torch.sum(y1_bar * y1_bar, dim=1).unsqueeze(1).unsqueeze(0), 
+            torch.sum(y1_bar * y2_bar, dim=1).unsqueeze(1).unsqueeze(0), 
+            torch.sum(y2_bar * y1_bar, dim=1).unsqueeze(1).unsqueeze(0), 
+            torch.sum(y2_bar * y2_bar, dim=1).unsqueeze(1).unsqueeze(0)
+        ], dim=0)
+        
+        w_p1_bar = torch.clamp(p1_bar, max=0)
+        w_p2_bar = torch.clamp(p2_bar, max=0)
+
+        # 计算 Lagrange 乘子 lambda
+        # 这里的 torch.where 是逐元素操作，完美支持 (B*H, 1) 的形状
+        lambda1 = torch.where(G[2]*w_p2_bar < G[3]*p1_bar, torch.zeros_like(p1_bar), 
+                  torch.where(G[1]*w_p1_bar < G[0]*p2_bar, w_p1_bar/G[0], 
+                  torch.clamp(G[3]*p1_bar - G[2]*p2_bar, max=0)/(G[0]*G[3] - G[1]*G[2])))
+        
+        lambda2 = torch.where(G[2]*w_p2_bar < G[3]*p1_bar, w_p2_bar/G[3], 
+                  torch.where(G[1]*w_p1_bar < G[0]*p2_bar, torch.zeros_like(p1_bar), 
+                  torch.clamp(G[0]*p2_bar - G[1]*p1_bar, max=0)/(G[0]*G[3] - G[1]*G[2])))
+
+        out = lambda1 * y1_bar + lambda2 * y2_bar + u_bar
+        
+        # 应用修正
+        rt_flat = xp1_flat.clone()
+        rt_flat[:, 3:4] = x_flat[:, 3:4] + out[:, 0:1]
+        
+        # 还原形状
+        rt = rt_flat.reshape(batch_size, horizon, dim)
+
+        return rt, torch.min(b)
+
+    @torch.no_grad()   # 仅用于采样
+    def invariance_hopper_cpx_batch(self, x, xp1):  # RoS diffuser with complex safety specification (hopper)
+        """
+        复杂约束 (位置+速度) 的任意 Batch Size 版本
+        """
+        batch_size, horizon, dim = x.shape
+        
+        x_flat = x.reshape(-1, dim)
+        xp1_flat = xp1.reshape(-1, dim)
+        n_total = x_flat.shape[0]
+
+        ref = xp1_flat - x_flat
+
+        height = 1.6
+        height = (height - self.means[0]) / self.stds[0]
+        vel_scale = 0.09 # 这是经过norm之后的
+
+        # 复杂 CBF: b = height - pos - 0.1*vel
+        b = height - x_flat[:, 3:4] - vel_scale * x_flat[:, 9:10]
+        
+        Lfb = 0 
+        Lgbu1 = -1 * torch.ones_like(x_flat[:, 3:4])
+        Lgbu2 = -vel_scale * torch.ones_like(x_flat[:, 3:4]) # 注意这里形状和 dim=0 的长度一致即可
+  
+        # G 形状: (B*H, 1, 2) -> 一个约束涉及两个变量
+        G = torch.cat([-Lgbu1, -Lgbu2], dim=1)
+        G = G.unsqueeze(1)
+        k = 1
+        h = Lfb + k * b
+        
+        # Q, q 针对两个变量 (位置, 速度)
+        q = -torch.cat([ref[:, 3:4], ref[:, 9:10]], dim=1).to(G.device)
+        
+        # Q 形状: (B*H, 2, 2)
+        Q = Variable(torch.eye(2))
+        Q = Q.unsqueeze(0).expand(n_total, 2, 2).to(G.device)
+        
+        e = Variable(torch.Tensor())
+        # out 形状: (B*H, 2)
+        out = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED)(Q, q, G, h, e, e)
+
+        rt_flat = xp1_flat.clone()
+        # 更新位置和速度
+        rt_flat[:, 3:4] = x_flat[:, 3:4] + out[:, 0:1]
+        rt_flat[:, 9:10] = x_flat[:, 9:10] + out[:, 1:2]
+        
+        rt = rt_flat.reshape(batch_size, horizon, dim)
+        return rt, torch.min(b)
+
+    @torch.no_grad()   # 仅用于采样
+    def invariance_hopper_cpx_cf_batch(self, x, xp1):   # RoS diffuser with complex safety specification, closed-form (hopper)
+        """
+        复杂约束 + 闭式解 的任意 Batch Size 版本
+        """
+        batch_size, horizon, dim = x.shape
+        
+        x_flat = x.reshape(-1, dim)
+        xp1_flat = xp1.reshape(-1, dim)
+
+        ref = xp1_flat - x_flat
+
+        height = 1.6
+        vel_scale = 0.09
+        height = (height - self.means[0]) / self.stds[0]
+
+        b = height - x_flat[:, 3:4] - vel_scale * x_flat[:, 9:10]
+        Lfb = 0 
+        Lgbu1 = -1 * torch.ones_like(x_flat[:, 3:4])
+        Lgbu2 = -vel_scale * torch.ones_like(x_flat[:, 3:4]) # 修正：这里应该是 x_flat
+  
+        # 约束 0
+        G0 = torch.cat([-Lgbu1, -Lgbu2], dim=1)
+        k = 1
+        h0 = Lfb + k * b
+
+        # 约束 1
+        Lgbu1_pos = 1 * torch.ones_like(x_flat[:, 3:4])
+        Lgbu2_vel = 0.1 * torch.ones_like(x_flat[:, 3:4])
+        G1 = torch.cat([-Lgbu1_pos, -Lgbu2_vel], dim=1)
+        h1 = Lfb + k * (x_flat[:, 3:4] + 0.1 * x_flat[:, 9:10] + 10)    
+   
+        q = -torch.cat([ref[:, 3:4], ref[:, 9:10]], dim=1).to(G0.device)
+
+        y1_bar = 1 * G0
+        y2_bar = 1 * G1
+        u_bar = -1 * q
+        
+        p1_bar = h0 - torch.sum(G0 * u_bar, dim=1).unsqueeze(1)
+        p2_bar = h1 - torch.sum(G1 * u_bar, dim=1).unsqueeze(1)
+
+        # 构造 Gram 矩阵
+        G = torch.cat([
+            torch.sum(y1_bar * y1_bar, dim=1).unsqueeze(1).unsqueeze(0), 
+            torch.sum(y1_bar * y2_bar, dim=1).unsqueeze(1).unsqueeze(0), 
+            torch.sum(y2_bar * y1_bar, dim=1).unsqueeze(1).unsqueeze(0), 
+            torch.sum(y2_bar * y2_bar, dim=1).unsqueeze(1).unsqueeze(0)
+        ], dim=0)
+        
+        w_p1_bar = torch.clamp(p1_bar, max=0)
+        w_p2_bar = torch.clamp(p2_bar, max=0)
+
+        # 闭式解逻辑 (逐元素)
+        lambda1 = torch.where(G[2]*w_p2_bar < G[3]*p1_bar, torch.zeros_like(p1_bar), 
+                  torch.where(G[1]*w_p1_bar < G[0]*p2_bar, w_p1_bar/G[0], 
+                  torch.clamp(G[3]*p1_bar - G[2]*p2_bar, max=0)/(G[0]*G[3] - G[1]*G[2])))
+        
+        lambda2 = torch.where(G[2]*w_p2_bar < G[3]*p1_bar, w_p2_bar/G[3], 
+                  torch.where(G[1]*w_p1_bar < G[0]*p2_bar, torch.zeros_like(p1_bar), 
+                  torch.clamp(G[0]*p2_bar - G[1]*p1_bar, max=0)/(G[0]*G[3] - G[1]*G[2])))
+
+        out = lambda1 * y1_bar + lambda2 * y2_bar + u_bar
+
+        rt_flat = xp1_flat.clone()
+        rt_flat[:, 3:4] = x_flat[:, 3:4] + out[:, 0:1]
+        rt_flat[:, 9:10] = x_flat[:, 9:10] + out[:, 1:2]
+        
+        rt = rt_flat.reshape(batch_size, horizon, dim)
+        return rt, torch.min(b)
+
+
+
 ###################################################################cheetah     
     @torch.no_grad()   #only for sampling
     def invariance_cheetah(self, x, xp1):
@@ -732,7 +1021,7 @@ class GaussianDiffusion(nn.Module):
 
         #normalize obstacle: Gaussian, x:0-6 control, 6-23 state
         height = 1.5 
-        height = (height - self.mean[0]) / self.std[0]
+        height = (height - self.means[0]) / self.stds[0]
 
         ############################################ceiling
         b = height - xp1[:,3:4] 
@@ -745,6 +1034,40 @@ class GaussianDiffusion(nn.Module):
 
         xp1 = xp1.unsqueeze(0)
         return xp1, torch.min(b[:,0])
+
+    @torch.no_grad()   # Hopper
+    def Shield_hopper_batch(self, x0, xp10): # Truncate method (hopper)
+        """
+        支持任意 Batch Size 的截断法 (Truncate) 实现。
+        输入形状: x0, xp10 -> (Batch, Horizon, Dim)
+        """
+        # 1. 克隆输入，避免修改原始数据
+        # x0 在此方法中未使用，保留它是为了与其他安全函数的接口签名保持一致
+        xp1 = xp10.clone()
+
+        # 2. 获取维度信息 (仅用于调试或断言，实际计算不需要显式使用)
+        # batch_size, horizon, dim = xp1.shape
+
+        # 3. 归一化障碍物高度
+        # 这里沿用之前的归一化逻辑：物理高度 1.5m -> 归一化后的潜变量数值
+        height_limit = 1.5 
+        height_val = (height_limit - self.means[0]) / self.stds[0]
+
+        ############################################
+        # 4. 执行向量化截断 (Vectorized Truncation)
+        # 原始逻辑是: if z > height_limit, then z = height_limit
+        # 这等价于对 z 维度取上界 (Upper Bound)
+        
+        # xp1[:, :, 3] 选中了所有 Batch 和所有 Horizon 的高度数据 (索引 3)
+        # torch.clamp(..., max=height_val) 会并行地检查并修正所有大于 height_val 的值
+        xp1[:, :, 3] = torch.clamp(xp1[:, :, 3], max=height_val)
+
+        # 5. 计算安全余量 (用于返回监控)
+        # b >= 0 表示安全。因为我们刚刚强制截断了，所以理论上返回的 b 应该是非负的 (>=0)
+        b = height_val - xp1[:, :, 3]
+
+        # 返回修正后的轨迹 xp1 和当前 Batch 中最小的安全余量
+        return xp1, torch.min(b)
 
 ###################################################################GD     
     @torch.no_grad()   #walker2d
@@ -810,6 +1133,55 @@ class GaussianDiffusion(nn.Module):
 
         xp1 = xp1.unsqueeze(0)
         return xp1, torch.min(b[:,0])
+
+    @torch.no_grad()   # Hopper
+    def GD_hopper_cpx_batch(self, x0, xp10):  # Classifier guidance or potential-based method (hopper)
+        """
+        支持任意 Batch Size 的引导法 (Guidance) 实现。
+        输入形状: x0, xp10 -> (Batch, Horizon, Dim)
+        """
+        x = x0.clone()
+        xp1 = xp10.clone()
+
+        # 1. 移除 squeeze，保持 (Batch, Horizon, Dim) 形状
+        # x = x.squeeze(0) 
+        # xp1 = xp1.squeeze(0)
+
+        # 2. 归一化障碍物高度
+        height_target = 1.6  
+        vel_scale = 0.09
+        height_norm = (height_target - self.means[0]) / self.stds[0]
+
+        ############################################
+        # 3. 向量化计算 Barrier Value (b)
+        # 原始公式: b = height - z - 0.1 * v_z
+        # x[:, :, 3] 是高度 (z), x[:, :, 9] 是垂直速度 (v_z)
+        # 结果 b 的形状为 (Batch, Horizon)
+        b = height_norm - x[:, :, 3] - vel_scale * x[:, :, 9]
+
+        # 4. 生成违规掩码 (Mask)
+        # mask 形状为 (Batch, Horizon)，True 表示该位置不安全
+        mask = b < 0 
+
+        # 5. 定义引导更新量 (Nudge)
+        u = -0.05
+        u2 = -0.5  # -0.05 * 10
+
+        # 6. 向量化应用更新 (Vectorized Update)
+        # 逻辑：
+        # 如果 mask 为 True (不安全): 使用 x (当前步) + u (人工修正)
+        # 如果 mask 为 False (安全): 保持 xp1 (扩散模型预测的下一步)
+        
+        # 更新高度 (Index 3)
+        xp1[:, :, 3] = torch.where(mask, x[:, :, 3] + u, xp1[:, :, 3])
+        
+        # 更新垂直速度 (Index 9)
+        xp1[:, :, 9] = torch.where(mask, x[:, :, 9] + u2, xp1[:, :, 9])
+
+        # 7. 移除 unsqueeze
+        # xp1 = xp1.unsqueeze(0)
+        
+        return xp1, torch.min(b)
 
 
     #------------------------------------------ training ------------------------------------------#

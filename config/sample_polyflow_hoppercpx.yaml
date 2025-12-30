@@ -1,0 +1,85 @@
+defaults:
+  - default
+  - backbone: poly
+  - algorithm: discrete_flow
+  - env: hopper
+  - _self_
+
+dataset:
+  _target_: src.datasets.constrained_dataset.ConstrainedMinariDataset
+  # 约束相关
+  obs_constrained_idx: ${obs_constrained_idx}
+  single_A: ${single_A}
+  single_b: ${single_b}
+
+  env: ${dataset_minari_name}
+  horizon: ${horizon}
+  normalizer: 'GaussianNormalizer'
+  preprocess_fns: []
+  max_path_length: ${max_seq}
+  max_n_episodes: 10000
+  termination_penalty: 0
+  use_padding: false
+
+env:
+  use_cpx: true
+  vel_scale: ${vel_scale}
+
+backbone:
+  share_traj_encoder: true
+
+  
+# 不加 guide policy config
+policy:
+  _target_: src.sampling.policies.PolyFlowPolicy
+  # diffusion_model: null
+  # normalizer: null
+  preprocess_fns: []
+
+
+val_dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: ${eval.samples}
+  shuffle: true
+
+eval:
+  load_model_path: "outputs/hoppercpx/polyflow_train/42_2025-12-30_13-32-45/state_200000.pt"
+  load_ema: true
+  samples: 200   # 计算分布差异时，采样多少个horizon
+  # rollout
+  n_episodes: 10  # rollout 多少条轨迹
+  seed: ${seed}
+  is_video: true
+  video_episodes: 2
+
+  check_index_list: [0, 1, 2, 3, 4] # 在计算平滑度时考虑哪些维度
+
+
+
+env_name: hoppercpx
+algo_name: polyflow
+run_name: sample
+
+
+device: "cuda:0"
+seed: 42
+dataset_minari_name: "mujoco/hopper/medium-v0"
+horizon: 100  # 如果要使用 unet 要保证 horizon 能够被8整除
+max_seq: 1000
+obs_dim: 11
+act_dim: 3
+transition_dim: 14
+cond_dim: 11
+steps: 10  # 采样步数
+
+
+height_limit: 1.6
+vel_scale: 0.01
+obs_constrained_idx: [0, 6] # 对应hopper 的z height, z vel
+full_constrained_idxs: [3, 9] # 对应hopper 的z height, z vel
+single_A: [[1, 0.01], [1, 0], [-1, 0], [0, 1], [0, -1]]
+single_b: [1.6, 1.6, -0.7, 5, 5]
+num_cons: 5
+
+
+

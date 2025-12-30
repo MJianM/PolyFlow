@@ -30,8 +30,6 @@ def train_worker(cfg: DictConfig):
     
     log.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
 
-    # if hasattr(cfg, 'file_path'):
-    #     cfg.file_path = to_absolute_path(cfg.file_path)
 
     log.info(f"Instantiating Dataset: {cfg.dataset._target_}")
     dataset = instantiate(cfg.dataset)
@@ -46,37 +44,31 @@ def train_worker(cfg: DictConfig):
     backbone = instantiate(cfg.backbone)
 
     log.info(f"Instantiating Diffusion: {cfg.algorithm._target_}")
-    algo = instantiate(cfg.algorithm, model=backbone).to(device)
+    diffusion = instantiate(cfg.algorithm, model=backbone).to(device)
     # CRITICAL: Set normalization parameters for the safety check.
     # The 'invariance' method in diffusion.py relies on self.norm_mins/maxs 
     # to normalize coordinates for obstacle checking.
     # Note: dataset.normalizer is a DatasetNormalizer, we need the specific normalizer for observations
     if cfg.dataset.normalizer == 'GaussianNormalizer':
-        algo.means = torch.from_numpy(dataset.normalizer.normalizers['observations'].means).to(device).float()
-        algo.stds = torch.from_numpy(dataset.normalizer.normalizers['observations'].stds).to(device).float()
+        diffusion.means = torch.from_numpy(dataset.normalizer.normalizers['observations'].means).to(device).float()
+        diffusion.stds = torch.from_numpy(dataset.normalizer.normalizers['observations'].stds).to(device).float()
     else:
-        algo.norm_mins = torch.from_numpy(dataset.normalizer.normalizers['observations'].mins).to(device).float()
-        algo.norm_maxs = torch.from_numpy(dataset.normalizer.normalizers['observations'].maxs).to(device).float()
+        diffusion.norm_mins = torch.from_numpy(dataset.normalizer.normalizers['observations'].mins).to(device).float()
+        diffusion.norm_maxs = torch.from_numpy(dataset.normalizer.normalizers['observations'].maxs).to(device).float()
 
+    # 加载模型
+    if hasattr(cfg.eval, 'load_model_path'):
+        cfg.eval.load_model_path = to_absolute_path(cfg.eval.load_model_path)
+    log.info(f"Load model from {cfg.eval.load_model_path}")
+    load_data = torch.load(cfg.eval.load_model_path, map_location=device, weights_only=False)
+    diffusion.load_state_dict(load_data['ema'])
 
-    log.info(f"Instantiating Trainer: {cfg.trainer._target_}")
-    trainer = instantiate(
-        cfg.trainer, 
-        diffusion_model=algo, 
-        dataset=dataset,
-        renderer=None,
-        results_folder=".",
-    )
-
-    trainer.train(n_train_steps=cfg.iteration, use_cosine_scheduler=True, writer=writer)
-    log.info("Training completed.")
-    trainer.save("final")
     
     # 评估阶段
     log.info("Starting evaluation...")
 
-
-    policy = instantiate(cfg.policy, guide=None, diffusion_model=algo, normalizer=dataset.normalizer)
+    log.info(f"Instantiating Policy: {cfg.policy._target_}")
+    policy = instantiate(cfg.policy, guide=None, diffusion_model=diffusion, normalizer=dataset.normalizer)
     
     batch = next(iter(val_loader))
     true_joint_normed = batch.trajectories # [B, H, A+O]
@@ -126,7 +118,7 @@ def train_worker(cfg: DictConfig):
             f"{'RetStd='}{np.mean(rollout_metrics['ret_std']):8.4f} "
             f"{'Safety='}{np.mean(rollout_metrics['safety_ratio']):8.4f} "
     )
-
+    # 绘制轨迹图
     env_handler.plot_expand_trajectory(
         traj_expand_list=obs_expand_traj_list, plot_height_limit=True,
         max_plot=2, save_path="rollout_result.png"
@@ -164,7 +156,7 @@ def train_worker(cfg: DictConfig):
     save_csv_native(log_dict, save_path="final_eval_metrics.csv")
 
 
-@hydra.main(config_path="config", config_name="train_flow_hopper.yaml")
+@hydra.main(config_path="config", config_name="sample_flow_hopper.yaml")
 def main(cfg: DictConfig):
 
     if "seed" in cfg:

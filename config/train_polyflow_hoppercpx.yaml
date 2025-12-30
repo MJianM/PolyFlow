@@ -1,13 +1,32 @@
 defaults:
   - default
-  - dataset: sequence
-  - backbone: dit
-  - algorithm: flow
+  - backbone: poly
+  - algorithm: discrete_flow
   - env: hopper
   - _self_
 
 dataset:
+  _target_: src.datasets.constrained_dataset.ConstrainedMinariDataset
+  # 约束相关
+  obs_constrained_idx: ${obs_constrained_idx}
+  single_A: ${single_A}
+  single_b: ${single_b}
+
+  env: ${dataset_minari_name}
+  horizon: ${horizon}
+  normalizer: 'GaussianNormalizer'
+  preprocess_fns: []
+  max_path_length: ${max_seq}
+  max_n_episodes: 10000
+  termination_penalty: 0
   use_padding: false
+
+env:
+  use_cpx: true
+  vel_scale: ${vel_scale}
+
+backbone:
+  share_traj_encoder: true
 
 trainer:
   _target_: src.utils.training.Trainer
@@ -20,23 +39,19 @@ trainer:
   train_lr: 1e-4
   gradient_accumulate_every: 1
   step_start_ema: 2000
-  update_ema_every: 10
-  log_freq: 500
+  update_ema_every: 100
+  log_freq: 200
   save_freq: 100000
   label_freq: ${trainer.save_freq}
   save_parallel: false
   
 # 不加 guide policy config
 policy:
-  _target_: src.sampling.policies.GuidedPolicy
+  _target_: src.sampling.policies.PolyFlowPolicy
   # diffusion_model: null
   # normalizer: null
   preprocess_fns: []
-  # sampling kwargs
-  # sample_fn: src.sampling.functions.n_step_guided_p_sample
-  # n_guide_steps: 2
-  # t_stopgrad: 2
-  # scale_grad_by_std: true
+
 
 val_dataloader:
   _target_: torch.utils.data.DataLoader
@@ -54,12 +69,13 @@ eval:
   check_index_list: [0, 1, 2, 3, 4] # 在计算平滑度时考虑哪些维度
 
 
-env_name: hopper
-algo_name: flow
+
+env_name: hoppercpx
+algo_name: polyflow
 run_name: train
 
 
-device: "cuda:2"
+device: "cuda:1"
 seed: 42
 dataset_minari_name: "mujoco/hopper/medium-v0"
 horizon: 100  # 如果要使用 unet 要保证 horizon 能够被8整除
@@ -68,8 +84,17 @@ obs_dim: 11
 act_dim: 3
 transition_dim: 14
 cond_dim: 11
-steps: 200  # 采样步数
+steps: 10  # 采样步数
 
 iteration: 1000000  # 训练step
 
-height_limit: 1.5
+height_limit: 1.6
+vel_scale: 0.01
+obs_constrained_idx: [0, 6] # 对应hopper 的z height, z vel
+full_constrained_idxs: [3, 9] # 对应hopper 的z height, z vel
+single_A: [[1, 0.01], [1, 0], [-1, 0], [0, 1], [0, -1]]
+single_b: [1.6, 1.6, -0.7, 5, 5]
+num_cons: 5
+
+
+

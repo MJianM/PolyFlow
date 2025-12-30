@@ -63,7 +63,7 @@ def train_worker(cfg: DictConfig):
         cfg.eval.load_model_path = to_absolute_path(cfg.eval.load_model_path)
     log.info(f"Load model from {cfg.eval.load_model_path}")
     load_data = torch.load(cfg.eval.load_model_path, map_location=device, weights_only=False)
-    diffusion.load_state_dict(load_data['model'])
+    diffusion.load_state_dict(load_data['ema'])
 
     
     # 评估阶段
@@ -89,7 +89,7 @@ def train_worker(cfg: DictConfig):
     
     # 检验与真实数据的匹配程度
     horizon = cfg.horizon
-    check_horizon = [0, horizon // 2, horizon - 1]
+    check_horizon = [1, horizon // 2, horizon - 1]
     eval_metrics = evaluate_dismatch_metrics(
         sampled_traj=trajectories.observations, true_traj=true_traj, check_horizon_list=check_horizon, max_samples=1000
     )

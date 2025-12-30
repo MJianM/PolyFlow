@@ -70,4 +70,6 @@ steps: 20  # diffusion 扩散步
 
 iteration: 1000000  # 训练step
 
+height_limit: 1.5
+
 

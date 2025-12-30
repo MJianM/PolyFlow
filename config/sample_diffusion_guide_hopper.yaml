@@ -47,6 +47,11 @@ run_name: sample
 seed: 42
 device: "cuda:0"
 
+height_limit: 1.5
+
+algorithm:
+  env_name: "hopper"
+  safe_method: "none"
 
 
 

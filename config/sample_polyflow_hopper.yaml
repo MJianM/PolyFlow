@@ -1,34 +1,18 @@
 defaults:
   - default
-  - dataset: sequence
-  - backbone: dit
-  - algorithm: flow
+  - dataset: sequence_cons
+  - backbone: poly
+  - algorithm: discrete_flow
   - env: hopper
   - _self_
 
 dataset:
   use_padding: false
 
-trainer:
-  _target_: src.utils.training.Trainer
-  # diffusion_model: ??
-  # dataset: ??
-  # renderer: null
-  device: ${device}
-  ema_decay: 0.995
-  train_batch_size: 64
-  train_lr: 1e-4
-  gradient_accumulate_every: 1
-  step_start_ema: 2000
-  update_ema_every: 10
-  log_freq: 500
-  save_freq: 100000
-  label_freq: ${trainer.save_freq}
-  save_parallel: false
   
 # 不加 guide policy config
 policy:
-  _target_: src.sampling.policies.GuidedPolicy
+  _target_: src.sampling.policies.PolyFlowPolicy
   # diffusion_model: null
   # normalizer: null
   preprocess_fns: []
@@ -44,6 +28,8 @@ val_dataloader:
   shuffle: true
 
 eval:
+  load_model_path: "outputs/hopper/polyflow_train/42_2025-12-29_22-39-57/state_final.pt"
+  load_ema: true
   samples: 200   # 计算分布差异时，采样多少个horizon
   # rollout
   n_episodes: 10  # rollout 多少条轨迹
@@ -51,15 +37,17 @@ eval:
   is_video: true
   video_episodes: 2
 
-  check_index_list: [0, 1, 2, 3, 4] # 在计算平滑度时考虑哪些维度
+  check_index_list: [0, 1, 2, 3, 4] # 在计算平滑度时考虑哪些obs维度
 
+backbone:
+  share_traj_encoder: true
 
 env_name: hopper
-algo_name: flow
-run_name: train
+algo_name: polyflow
+run_name: sample
 
 
-device: "cuda:2"
+device: "cuda:0"
 seed: 42
 dataset_minari_name: "mujoco/hopper/medium-v0"
 horizon: 100  # 如果要使用 unet 要保证 horizon 能够被8整除
@@ -68,8 +56,16 @@ obs_dim: 11
 act_dim: 3
 transition_dim: 14
 cond_dim: 11
-steps: 200  # 采样步数
+steps: 10  # 采样步数
 
 iteration: 1000000  # 训练step
 
 height_limit: 1.5
+obs_constrained_idx: [0] # 对应hopper 的z height
+full_constrained_idxs: [3] # 对应hopper 的z height
+single_A: [[1], [-1]]
+single_b: [1.5, -0.7]
+num_cons: 2
+
+
+

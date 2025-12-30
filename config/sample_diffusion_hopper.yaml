@@ -53,5 +53,9 @@ transition_dim: 14
 cond_dim: 11
 steps: 20  # diffusion 扩散步
 
+height_limit: 1.5
 
+algorithm:
+  env_name: "hopper"
+  safe_method: "none"
 

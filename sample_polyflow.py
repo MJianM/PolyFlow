@@ -58,25 +58,22 @@ def train_worker(cfg: DictConfig):
         algo.norm_mins = torch.from_numpy(dataset.normalizer.normalizers['observations'].mins).to(device).float()
         algo.norm_maxs = torch.from_numpy(dataset.normalizer.normalizers['observations'].maxs).to(device).float()
 
+    # 加载模型
+    if hasattr(cfg.eval, 'load_model_path'):
+        cfg.eval.load_model_path = to_absolute_path(cfg.eval.load_model_path)
+    log.info(f"Load model from {cfg.eval.load_model_path}")
+    load_data = torch.load(cfg.eval.load_model_path, map_location=device, weights_only=False)
+    if cfg.eval.load_ema:
+        algo.load_state_dict(load_data['ema'])
+    else:
+        algo.load_state_dict(load_data['model'])
 
-    log.info(f"Instantiating Trainer: {cfg.trainer._target_}")
-    trainer = instantiate(
-        cfg.trainer, 
-        diffusion_model=algo, 
-        dataset=dataset,
-        renderer=None,
-        results_folder=".",
-    )
 
-    trainer.train(n_train_steps=cfg.iteration, use_cosine_scheduler=True, writer=writer)
-    log.info("Training completed.")
-    trainer.save("final")
-    
     # 评估阶段
     log.info("Starting evaluation...")
 
 
-    policy = instantiate(cfg.policy, guide=None, diffusion_model=algo, normalizer=dataset.normalizer)
+    policy = instantiate(cfg.policy, guide=None, diffusion_model=algo, normalizer=dataset.normalizer, dataset=dataset)
     
     batch = next(iter(val_loader))
     true_joint_normed = batch.trajectories # [B, H, A+O]
@@ -164,7 +161,7 @@ def train_worker(cfg: DictConfig):
     save_csv_native(log_dict, save_path="final_eval_metrics.csv")
 
 
-@hydra.main(config_path="config", config_name="train_flow_hopper.yaml")
+@hydra.main(config_path="config", config_name="sample_polyflow_hopper.yaml")
 def main(cfg: DictConfig):
 
     if "seed" in cfg:
