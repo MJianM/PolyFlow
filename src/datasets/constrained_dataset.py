@@ -20,7 +20,7 @@ class ConstrainedMinariDataset(MinariSequenceDataset):
     会自动将物理空间的约束 A, b 转换为归一化空间的约束，以匹配归一化后的观测数据。
     """
 
-    def __init__(self, obs_constrained_idx, single_A, single_b, *args, **kwargs):
+    def __init__(self, full_constrained_idx, single_A, single_b, *args, **kwargs):
         """
         参数:
             obs_constrained_idx (list/array): 观测向量中参与约束的维度索引 (例如 [0, 1] 表示 x, y)。
@@ -30,17 +30,18 @@ class ConstrainedMinariDataset(MinariSequenceDataset):
         """
         super().__init__(*args, **kwargs)
 
-        self.obs_constrained_idx = np.array(obs_constrained_idx, dtype=int)
+        self.full_constrained_idx = np.array(full_constrained_idx, dtype=int)
         
         # 存储原始约束 (物理空间)
         self.raw_A = np.array(single_A, dtype=np.float32)
         self.raw_b = np.array(single_b, dtype=np.float32)
         
         # 验证维度
-        assert self.raw_A.shape[1] == len(self.obs_constrained_idx), \
-            f"A matrix columns ({self.raw_A.shape[1]}) must match constrained dims ({len(self.obs_constrained_idx)})"
+        assert self.raw_A.shape[1] == len(self.full_constrained_idx), \
+            f"A matrix columns ({self.raw_A.shape[1]}) must match constrained dims ({len(self.full_constrained_idx)})"
 
         # 计算归一化后的约束 (Norm Space)
+        print("---------------------")
         self.norm_A, self.norm_b = self._normalize_constraints()
 
         # 预计算 chebyshev center
@@ -48,14 +49,8 @@ class ConstrainedMinariDataset(MinariSequenceDataset):
         # center: (sub_dim,), radius: scalar
         self.center, self.radius = chebyshev_center_lp(self.norm_A, self.norm_b)
 
-        print("---------------------")
         print(f"norm A:\n {self.norm_A}")
         print(f"norm b:\n {self.norm_b}")
-        obs_normalizer = self.normalizer.normalizers['observations']
-        obs_means = obs_normalizer.means[self.obs_constrained_idx]
-        obs_stds = obs_normalizer.stds[self.obs_constrained_idx]
-        print(f"obs means: {obs_means}")
-        print(f"obs stds: {obs_stds}")
         print(f"chebyshev center:\n {self.center}")
         print(f"chebyshev radius: {self.radius}")
         print("-------------------")
@@ -85,19 +80,26 @@ class ConstrainedMinariDataset(MinariSequenceDataset):
         """
         # 获取观测的 normalizer (DatasetNormalizer 实例)
         obs_normalizer = self.normalizer.normalizers['observations']
+        act_normalizer = self.normalizer.normalizers['actions']
         
         if hasattr(obs_normalizer, "means"):
             # === GaussianNormalizer (均值方差归一化) ===
-            obs_means = obs_normalizer.means[self.obs_constrained_idx]
-            obs_stds = obs_normalizer.stds[self.obs_constrained_idx]
+            full_means = np.concatenate([act_normalizer.means, obs_normalizer.means])
+            full_stds = np.concatenate([act_normalizer.stds, obs_normalizer.stds])
+            obs_means = full_means[self.full_constrained_idx]
+            obs_stds = full_stds[self.full_constrained_idx]
+            print(f"means: {obs_means}")
+            print(f"stds: {obs_stds}")
             
             scale = obs_stds
             offset = obs_means
             
         else:
             # === LimitsNormalizer (归一化到 [-1, 1]) ===
-            obs_mins = obs_normalizer.mins[self.obs_constrained_idx]
-            obs_maxs = obs_normalizer.maxs[self.obs_constrained_idx]
+            full_mins = np.concatenate([act_normalizer.mins, obs_normalizer.mins])
+            full_maxs = np.concatenate([act_normalizer.maxs, obs_normalizer.maxs])
+            obs_mins = full_mins[self.full_constrained_idx]
+            obs_maxs = full_maxs[self.full_constrained_idx]
             
             scale = (obs_maxs - obs_mins) / 2.0
             offset = (obs_maxs + obs_mins) / 2.0
@@ -127,18 +129,23 @@ class ConstrainedMinariDataset(MinariSequenceDataset):
         返回包含约束的 Batch。
         注意：A 和 b 会被复制扩展到 horizon 长度，以适应序列模型输入。
         """
-        # 获取基础的 batch (trajectories, conditions)
-        # trajectories shape: [horizon, action_dim + observation_dim]
+        # 获取基础 batch (如果执行了 to(device)，这里返回的已经是 GPU Tensor)
         base_batch = super().__getitem__(idx)
-        
         horizon = base_batch.trajectories.shape[0]
-        
-        # 扩展 A 和 b 到时间维度: [horizon, num_cons, dim_sub]
-        A_seq = np.tile(self.norm_A[None, :, :], (horizon, 1, 1))
-        b_seq = np.tile(self.norm_b[None, :], (horizon, 1))
-        
-        # 转换为 Tensor (如果 dataloader 不自动做的话，这里保持 numpy 也可以，通常 dataloader 会处理)
-        # 这里为了和 base_batch 一致，保持 numpy
+
+        # 检查 norm_A 是否为 Tensor 来决定处理逻辑
+        if torch.is_tensor(self.norm_A):
+            # === GPU / Tensor 模式 ===
+            # 使用 torch.repeat / expand 扩展
+            # A_seq: [horizon, num_cons, dim_sub]
+            A_seq = self.norm_A.unsqueeze(0).repeat(horizon, 1, 1)
+            # b_seq: [horizon, num_cons]
+            b_seq = self.norm_b.unsqueeze(0).repeat(horizon, 1)
+        else:
+            # === CPU / Numpy 模式 ===
+            A_seq = np.tile(self.norm_A[None, :, :], (horizon, 1, 1))
+            b_seq = np.tile(self.norm_b[None, :], (horizon, 1))
+
         return ConstrainedBatch(
             trajectories=base_batch.trajectories,
             conditions=base_batch.conditions,
@@ -160,12 +167,12 @@ class ConstrainedMinariDataset(MinariSequenceDataset):
         """
         # 1. 计算 Chebyshev 中心和半径 (基于归一化后的约束)
         # center: (sub_dim,), radius: scalar
-        if self.center is None or self.radius is None:
-            center, radius = chebyshev_center_lp(self.norm_A, self.norm_b)
+        if torch.is_tensor(self.center):
+            center = self.center.to(device)
         else:
-            center = self.center
-            radius = self.radius
-        center = center.to(device)
+            center = torch.from_numpy(self.center).float().to(device)
+            
+        radius = self.radius # scalar
         
         # 2. 准备全维度的随机噪声容器 (Standard Normal Distribution)
         # trajectories 结构为: [actions, observations]
@@ -188,28 +195,35 @@ class ConstrainedMinariDataset(MinariSequenceDataset):
         
         # 4. 将受限样本填入全维度轨迹中
         # 这里的关键是确定受限维度在 [actions, observations] 中的全局索引
-        # self.obs_constrained_idx 是相对于 observations 的索引
+        # self.full_constrained_idx 是相对于 observations 的索引
         # 因此全局索引需要加上 action_dim
-        global_constrained_idxs = self.obs_constrained_idx + self.action_dim
-        
+        if torch.is_tensor(self.full_constrained_idx):
+            # 如果是 Tensor，需要转为 long 并确保在 device (或 cpu 既然是索引)
+            # 实际上高级索引最好是 list 或 long tensor
+            idxs = (self.full_constrained_idx).long().to(device)
+        else:
+             idxs = self.full_constrained_idx 
+
         # 执行替换
-        sample_trajs[:, :, global_constrained_idxs] = constrained_samples
+        sample_trajs[:, :, idxs] = constrained_samples
         
         # 5. 轨迹以适配 Flow Matching 输入 [B, T, D]
         sample_batch = sample_trajs.reshape(batch_size, self.horizon, full_dim)
         
         # 6. 构建 A_batch 和 b_batch
         # 约束在时间维和Batch维是共享/重复的
-        
+        if torch.is_tensor(self.norm_A):
+            raw_A_tensor = self.norm_A.to(device)
+            raw_b_tensor = self.norm_b.to(device)
+        else:
+            raw_A_tensor = torch.from_numpy(self.norm_A).float().to(device)
+            raw_b_tensor = torch.from_numpy(self.norm_b).float().to(device)
+
         # A_batch: [B, T, M, sub_dim]
-        # self.norm_A shape: (M, sub_dim) -> (1, 1, M, sub_dim) -> repeat
-        A_batch = torch.from_numpy(self.norm_A).float().unsqueeze(0).unsqueeze(0)
-        A_batch = A_batch.repeat(batch_size, self.horizon, 1, 1).to(device)
+        A_batch = raw_A_tensor.unsqueeze(0).unsqueeze(0).repeat(batch_size, self.horizon, 1, 1)
         
         # b_batch: [B, T, M]
-        # self.norm_b shape: (M,) -> (1, 1, M) -> repeat
-        b_batch = torch.from_numpy(self.norm_b).float().unsqueeze(0).unsqueeze(0)
-        b_batch = b_batch.repeat(batch_size, self.horizon, 1).to(device)
+        b_batch = raw_b_tensor.unsqueeze(0).unsqueeze(0).repeat(batch_size, self.horizon, 1)
         
         return sample_batch, A_batch, b_batch
     
@@ -311,7 +325,7 @@ class BoxConstrainedMinariDataset(ConstrainedMinariDataset):
         # 4. 填充回全维度轨迹
         # -----------------------------------------------------------
         # 计算全局索引 (trajectory = concat[action, observation])
-        global_constrained_idxs = self.obs_constrained_idx + self.action_dim
+        global_constrained_idxs = self.full_constrained_idx 
         
         # 替换受限部分的数据
         sample_trajs[:, :, global_constrained_idxs] = constrained_samples

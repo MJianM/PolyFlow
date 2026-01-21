@@ -1,0 +1,15 @@
+defaults:
+  - time_gaugeflow_hoppercpx2
+  - _self_
+
+
+
+env_name: hoppercpx2
+algo_name: gaugeflow
+run_name: time_step100
+
+
+device: "cuda:0"
+seed: 42
+
+steps: 100  # 采样步数

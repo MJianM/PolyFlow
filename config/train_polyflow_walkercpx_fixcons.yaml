@@ -1,0 +1,17 @@
+defaults:
+  - train_polyflow_walkercpx
+  - _self_
+
+backbone:
+  share_traj_encoder: true
+  time_invariance_cons: true
+
+env_name: walker2dcpx
+algo_name: polyflow
+run_name: train_fixcons
+
+
+device: "cuda:4"
+seed: 42
+
+steps: 10  # 采样步数

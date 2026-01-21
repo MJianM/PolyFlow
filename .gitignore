@@ -5,6 +5,7 @@
 *.mp4
 *.pt
 *.0
+*.pdf
 events.out.*
 
 __pycache__

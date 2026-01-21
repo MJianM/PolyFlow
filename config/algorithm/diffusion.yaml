@@ -14,3 +14,5 @@ predict_epsilon: false
 action_weight: 10.0
 loss_discount: 1.0
 loss_weights: null
+env_name: 'hopper'
+safe_method: 'none'

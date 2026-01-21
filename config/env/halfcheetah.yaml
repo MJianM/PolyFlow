@@ -1,0 +1,8 @@
+defaults:
+  - default
+
+
+_target_: src.env.halfcheetah.HalfCheetahEnv
+leg_limit: ${leg_limit}
+torsion_limit: ${torsion_limit}
+bound_limit: 1.0

@@ -6,12 +6,11 @@ defaults:
   - env: hopper
   - _self_
 
+env:
+  use_cpx: 0
 
 trainer:
   _target_: src.utils.training.Trainer
-  # diffusion_model: ??
-  # dataset: ??
-  # renderer: null
   device: ${device}
   ema_decay: 0.995
   train_batch_size: 32
@@ -30,7 +29,7 @@ algo_name: diffusionvalue
 run_name: train
 
 
-device: "cuda:2"
+device: "cuda:3"
 seed: 42
 dataset_minari_name: "mujoco/hopper/medium-v0"
 horizon: 600  # 如果要使用 unet 要保证 horizon 能够被8整除
@@ -42,5 +41,3 @@ cond_dim: 11
 steps: 20  # diffusion 扩散步
 
 iteration: 200000  # 训练step
-
-height_limit: 1.5

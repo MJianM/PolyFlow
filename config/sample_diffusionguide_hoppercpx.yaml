@@ -1,0 +1,55 @@
+defaults:
+  - sample_diffusion_hoppercpx
+  - _self_
+
+guide:
+  backbone:
+    _target_: src.models.temporal.ValueFunction
+    horizon: ${horizon}
+    transition_dim: ${transition_dim}
+    cond_dim: ${cond_dim}
+    dim: 32
+    dim_mults: [1, 2, 4, 8]
+    out_dim: 1
+  algorithm: 
+    _target_: src.models.diffusion.ValueDiffusion
+    horizon: ${horizon}
+    observation_dim: ${obs_dim}
+    action_dim: ${act_dim}
+    n_timesteps: ${steps}
+    loss_type: 'value_l2'
+
+  load_model_path: ??
+  policy:
+    _target_: src.sampling.guides.ValueGuide
+
+  
+# 不加 guide policy config
+policy:
+  _target_: src.sampling.policies.GuidedPolicy
+  # diffusion_model: null
+  # normalizer: null
+  preprocess_fns: []
+  # sampling kwargs
+  sample_fn: 
+    _target_: src.sampling.functions.n_step_guided_p_sample
+    _partial_: true
+  scale: 0.1
+  n_guide_steps: 2
+  t_stopgrad: 2
+  scale_grad_by_std: true
+
+
+env_name: hoppercpx
+algo_name: diffusionguide
+run_name: sample
+
+seed: 42
+device: "cuda:0"
+
+height_limit: 1.6
+vel_scale: 0.01
+use_cpx: 1
+
+
+

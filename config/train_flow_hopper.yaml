@@ -9,11 +9,11 @@ defaults:
 dataset:
   use_padding: false
 
+env:
+  use_cpx: 0
+
 trainer:
   _target_: src.utils.training.Trainer
-  # diffusion_model: ??
-  # dataset: ??
-  # renderer: null
   device: ${device}
   ema_decay: 0.995
   train_batch_size: 64
@@ -22,7 +22,7 @@ trainer:
   step_start_ema: 2000
   update_ema_every: 10
   log_freq: 500
-  save_freq: 100000
+  save_freq: 200000
   label_freq: ${trainer.save_freq}
   save_parallel: false
   
@@ -59,7 +59,7 @@ algo_name: flow
 run_name: train
 
 
-device: "cuda:2"
+device: "cuda:4"
 seed: 42
 dataset_minari_name: "mujoco/hopper/medium-v0"
 horizon: 100  # 如果要使用 unet 要保证 horizon 能够被8整除
@@ -72,4 +72,3 @@ steps: 200  # 采样步数
 
 iteration: 1000000  # 训练step
 
-height_limit: 1.5

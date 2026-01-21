@@ -1,0 +1,17 @@
+defaults:
+  - default
+
+
+_target_: src.models.flow.GaugeFlowMatching
+horizon: ${horizon}
+observation_dim: ${obs_dim}
+action_dim: ${act_dim}
+n_timesteps: ${steps}
+loss_type: 'l2'
+action_weight: 10
+loss_discount: 1.0
+loss_weights: null
+full_constrained_idxs: ${full_constrained_idxs}
+# normed_single_A: ??
+# normed_single_b: ??
+# normed_center_point: ??

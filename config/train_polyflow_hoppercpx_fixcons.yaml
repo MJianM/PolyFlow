@@ -1,0 +1,27 @@
+defaults:
+  - train_polyflow_hoppercpx
+  - _self_
+
+
+
+backbone:
+  share_traj_encoder: true
+  time_invariance_cons: true
+
+
+
+env_name: hoppercpx
+algo_name: polyflow
+run_name: train_fixcons
+
+
+device: "cuda:7"
+seed: 42
+
+
+iteration: 1000000  # 训练step
+
+
+
+
+

@@ -1,0 +1,95 @@
+defaults:
+  - default
+  - backbone: dit
+  - algorithm: gauge_flow
+  - env: hopper
+  - _self_
+
+dataset:
+  _target_: src.datasets.constrained_dataset.ConstrainedMinariDataset
+  # 约束相关
+  full_constrained_idx: ${full_constrained_idxs}
+  single_A: ${single_A}
+  single_b: ${single_b}
+
+  env: ${dataset_minari_name}
+  horizon: ${horizon}
+  normalizer: 'GaussianNormalizer'
+  preprocess_fns: []
+  max_path_length: ${max_seq}
+  max_n_episodes: 10000
+  termination_penalty: 0
+  use_padding: false
+
+env:
+  use_cpx: ${use_cpx}
+  vel_scale: ${vel_scale}
+  height_limit: ${height_limit}
+  height_min: ${height_min}
+  v_max: ${v_max}
+  v_min: ${v_min}
+
+trainer:
+  _target_: src.utils.training.Trainer
+  device: ${device}
+  ema_decay: 0.995
+  train_batch_size: 64
+  train_lr: 1e-4
+  gradient_accumulate_every: 1
+  step_start_ema: 2000
+  update_ema_every: 10
+  log_freq: 500
+  save_freq: 200000
+  label_freq: ${trainer.save_freq}
+  save_parallel: false
+  
+# 不加 guide policy config
+policy:
+  _target_: src.sampling.policies.GuidedPolicy
+  preprocess_fns: []
+
+
+val_dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: ${eval.samples}
+  shuffle: true
+
+eval:
+  samples: 200   # 计算分布差异时，采样多少个horizon
+  # rollout
+  n_episodes: 10  # rollout 多少条轨迹
+  seed: ${seed}
+  is_video: true
+  video_episodes: 2
+
+  check_index_list: [0, 1, 2, 3, 4] # 在计算平滑度时考虑哪些维度
+
+
+env_name: hoppercpx2
+algo_name: gaugeflow
+run_name: train_step100
+
+
+device: "cuda:4"
+seed: 42
+dataset_minari_name: "mujoco/hopper/medium-v0"
+horizon: 100  # 如果要使用 unet 要保证 horizon 能够被8整除
+max_seq: 1000
+obs_dim: 11
+act_dim: 3
+transition_dim: 14
+cond_dim: 11
+steps: 100  # 采样步数
+
+iteration: 1000000  # 训练step
+
+height_limit: 1.5
+height_min: 0.8
+v_max: 2.5
+v_min: -2.5
+vel_scale: 0.01
+use_cpx: 2
+full_constrained_idxs: [3, 9] # 对应hopper 的z height, z vel
+single_A: [[1, 0.01], [1, 0], [-1, 0], [0, 1], [0, -1]]
+single_b: [1.5, 1.5, -0.8, 2.5, 2.5]
+num_cons: 5

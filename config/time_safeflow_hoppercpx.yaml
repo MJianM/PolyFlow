@@ -1,0 +1,31 @@
+defaults:
+  - time_flow_hoppercpx
+
+algorithm:
+  _target_: src.models.flow.SafeFlowMathcing
+  horizon: ${horizon}
+  observation_dim: ${obs_dim}
+  action_dim: ${act_dim}
+  n_timesteps: ${steps}
+  loss_type: 'l2'
+  action_weight: 10
+  loss_discount: 1.0
+  loss_weights: null
+  env_name: "hopper_cpx"
+  safe_method: "safeflow"
+  height_limit: ${height_limit}
+  vel_scale: ${vel_scale}
+  obs_vel_idx: 6
+
+env_name: hoppercpx
+algo_name: safeflow
+run_name: time_step200
+
+device: "cuda:0"
+seed: 42
+
+height_limit: 1.6
+vel_scale: 0.01
+use_cpx: 1
+steps: 200
+

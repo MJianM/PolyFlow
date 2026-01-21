@@ -1,0 +1,18 @@
+defaults:
+  - train_polyflow_hoppercpx_fixcons
+  - _self_
+
+algorithm:
+  use_ot_batch: true
+
+
+env_name: hoppercpx
+algo_name: polyflow
+run_name: train_fixcons_ot
+
+
+device: "cuda:5"
+seed: 42
+
+
+iteration: 1000000  # 训练step

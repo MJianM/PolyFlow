@@ -31,7 +31,10 @@ class PartiallyConstrainedFlowModel(nn.Module):
                  max_seq: int, 
                  embed_dim: int = 128, 
                  share_traj_encoder: bool = True,  # <--- 新增参数
-                 cons_begin_seq_idx: int = 1, # <--- 生成起始索引
+                 cons_begin_seq_idx: int = 1, # <--- 开始受到约束的horizon索引
+                 time_invariance_cons: bool = False, # <--- 约束A，b 是否不随horizon变化
+                 ray_shooting_method: str = 'hard',
+                 ray_shooting_beta: float = 50,
                  # 约束部分特定的参数
                  num_rays: int = 1,
                  num_heads_cons: int = 4, 
@@ -53,6 +56,10 @@ class PartiallyConstrainedFlowModel(nn.Module):
         self.share_traj_encoder = share_traj_encoder
         self.device = device
         self.cons_begin_seq_idx = cons_begin_seq_idx # 保存起始索引
+        self.time_invariance_cons = time_invariance_cons
+        self.ray_shooting_method = ray_shooting_method
+        self.ray_shooting_beta = ray_shooting_beta
+        print(f"PartialPolyFlow Using time invariance cons: {self.time_invariance_cons}   Ray shooting method: {self.ray_shooting_method}  Ray shooting beta: {self.ray_shooting_beta}")
         
         # 1. 维度计算与索引处理
         # ------------------------------------------------------------
@@ -125,11 +132,17 @@ class PartiallyConstrainedFlowModel(nn.Module):
         # ------------------------------------------------------------
         if self.dim_c > 0:
             remain_length = self.max_seq - self.cons_begin_seq_idx
+            if self.time_invariance_cons:
+                # 因为约束形式不随horizon变化，因此没有必要在horizon上进行attn
+                constrained_horizon_length = 1  
+            else:
+                constrained_horizon_length = remain_length
+
             self.constraint_encoder = ConstraintEncoder(
                 x_dim=self.dim_c, 
                 embed_dim=embed_dim, 
                 num_cons=num_cons,
-                max_seq=remain_length, 
+                max_seq=constrained_horizon_length, 
                 num_heads=num_heads_cons, 
                 num_layers=num_layers_cons,
                 use_block_mask=use_block_mask_cons, 
@@ -155,7 +168,7 @@ class PartiallyConstrainedFlowModel(nn.Module):
                 nn.Linear(embed_dim, self.num_rays * self.dim_c)
             ).to(device)
 
-            self.ray_shooter = EfficientRayShootingLayer().to(device)
+            self.ray_shooter = EfficientRayShootingLayer(method=self.ray_shooting_method, beta=self.ray_shooting_beta).to(device)
 
             self.weight_decoder = OneWeightDecoder(
                 x_dim=self.dim_c, 
@@ -237,33 +250,47 @@ class PartiallyConstrainedFlowModel(nn.Module):
             # 3.1 编码约束 (只编码 active 部分，节省计算)
             # 因为 ConstraintEncoder 内部是 Block-Diagonal 的，所以切片输入是安全的
             # 输出: [B, S_future, num_cons, embed_dim]
-            cons_lat_active = self.constraint_encoder(A_active, b_active)
-            
-            # 3.2 Cross Attention (融合)
-            # 展平 Constraint: [B, S_future * num_cons, embed_dim]
-            S_future = traj_lat_c_active.size(1)
-            cons_lat_flat = cons_lat_active.reshape(batch_size, S_future * self.num_cons, self.embed_dim)
-            
-            # 处理 Mask: 切割预计算的 Mask
-            if self.full_cross_attn_mask is not None:
-                # Query 维度: start ~ end
-                # Key 维度: start*num_cons ~ end*num_cons
-                # 注意：create_block_cross_attention_mask 必须是 block 对齐的
-                active_mask = self.full_cross_attn_mask[
-                    start_idx : , 
-                    start_idx * self.num_cons : 
-                ]
+            if self.time_invariance_cons:
+                # 只输入一个horizon长度即可, 返回 (batch, 1, cons_num, embed)
+                cons_lat_active = self.constraint_encoder(A_active[:, 0:1, :, :], b_active[:, 0:1, :])
             else:
-                active_mask = None
-
-            # 运行 Attention
-            # Query: [B, S_future, E], Key: [B, S_future*M, E]
-            e_c_active, _ = self.cross_attn(
-                query=traj_lat_c_active, 
-                key_value=cons_lat_flat, 
-                attn_mask=active_mask
-            )
+                cons_lat_active = self.constraint_encoder(A_active, b_active)
             
+            if self.time_invariance_cons:
+                # 运行 Attention
+                # Query: [B, S_future, E], Key: [B, M, E]
+                cons_lat_flat = cons_lat_active.reshape(batch_size, self.num_cons, self.embed_dim)
+                e_c_active, _ = self.cross_attn(
+                    query=traj_lat_c_active, 
+                    key_value=cons_lat_flat, 
+                )
+            else:
+                # 3.2 Cross Attention (融合)
+                # 展平 Constraint: [B, S_future * num_cons, embed_dim]
+                S_future = traj_lat_c_active.size(1)
+                cons_lat_flat = cons_lat_active.reshape(batch_size, S_future * self.num_cons, self.embed_dim)
+                
+                # 处理 Mask: 切割预计算的 Mask
+                if self.full_cross_attn_mask is not None:
+                    # Query 维度: start ~ end
+                    # Key 维度: start*num_cons ~ end*num_cons
+                    # 注意：create_block_cross_attention_mask 必须是 block 对齐的
+                    active_mask = self.full_cross_attn_mask[
+                        start_idx : , 
+                        start_idx * self.num_cons : 
+                    ]
+                else:
+                    active_mask = None
+
+                # 运行 Attention
+                # Query: [B, S_future, E], Key: [B, S_future*M, E]
+                e_c_active, _ = self.cross_attn(
+                    query=traj_lat_c_active, 
+                    key_value=cons_lat_flat, 
+                    attn_mask=active_mask
+                )
+            
+            S_future = traj_lat_c_active.size(1)
             # 3.3 Ray Generation & Shooting (仅对未来)
             rays_active = self.ray_mlp(e_c_active).view(batch_size, S_future, self.num_rays, self.dim_c)
             rays_active = F.normalize(rays_active, p=2, dim=-1)

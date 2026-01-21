@@ -1,0 +1,17 @@
+defaults:
+  - train_polyflow_hoppercpx2
+  - _self_
+
+backbone:
+  share_traj_encoder: true
+  time_invariance_cons: true
+
+env_name: hoppercpx2
+algo_name: polyflow
+run_name: train_fixcons
+
+
+device: "cuda:0"
+seed: 42
+
+steps: 10  # 采样步数

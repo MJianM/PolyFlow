@@ -130,7 +130,7 @@ def chebyshev_center_lp(A, b, method='scipy'):
             res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
             
             if res.success:
-                center = torch.from_numpy(res.x[:-1].astype(np.float32))
+                center = res.x[:-1].astype(np.float32)
                 radius = res.x[-1]
                 return center, radius
             else:
@@ -160,7 +160,7 @@ def chebyshev_center_lp(A, b, method='scipy'):
             problem.solve()
             
             if problem.status in ["optimal", "optimal_inaccurate"]:
-                center = torch.from_numpy(x.value.astype(np.float32))
+                center = x.value.astype(np.float32)
                 radius = r.value
                 return center, radius
             else:

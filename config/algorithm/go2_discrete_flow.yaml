@@ -1,0 +1,13 @@
+defaults:
+  - default
+
+
+_target_: src.models.flow.DiscreteFlowMatchingGo2
+horizon: ${horizon}
+observation_dim: ${obs_dim}
+action_dim: ${act_dim}
+n_timesteps: ${steps}
+loss_type: 'l2'
+action_weight: 10
+loss_discount: 0.99
+loss_weights: null

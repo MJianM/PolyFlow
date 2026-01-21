@@ -1,0 +1,30 @@
+defaults:
+  - time_flow_halfcheetah
+
+algorithm:
+  _target_: src.models.flow.SafeFlowMathcing
+  horizon: ${horizon}
+  observation_dim: ${obs_dim}
+  action_dim: ${act_dim}
+  n_timesteps: ${steps}
+  loss_type: 'l2'
+  action_weight: 10
+  loss_discount: 1.0
+  loss_weights: null
+  env_name: "halfcheetah"
+  safe_method: "safeflow"
+  leg_limit: ${leg_limit}
+  torsion_limit: ${torsion_limit}
+
+env_name: halfcheetah
+algo_name: safeflow
+run_name: time_step100
+
+device: "cuda:0"
+seed: 42
+
+
+steps: 100
+leg_limit: 1.2
+torsion_limit: 0.8
+

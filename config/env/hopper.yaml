@@ -3,5 +3,4 @@ defaults:
 
 
 _target_: src.env.hopper.HopperEnv
-height_limit: ${height_limit}
-use_cpx: false
+use_cpx: 0

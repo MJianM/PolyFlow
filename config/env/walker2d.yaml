@@ -1,0 +1,6 @@
+defaults:
+  - default
+
+
+_target_: src.env.walker2d.Walker2dEnv
+use_cpx: 0

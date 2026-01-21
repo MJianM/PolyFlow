@@ -1,5 +1,6 @@
 from collections import namedtuple
 import numpy as np
+import copy
 import torch
 import pdb
 import minari
@@ -12,69 +13,96 @@ from .buffer import ReplayBuffer
 Batch = namedtuple('Batch', 'trajectories conditions')
 ValueBatch = namedtuple('ValueBatch', 'trajectories conditions values')
 
-
 class MinariSequenceDataset(torch.utils.data.Dataset):
     """
     MinariSequenceDataset 用于从 Minari 数据集加载和处理序列数据。
     它从 minari 加载数据，存储在 ReplayBuffer 中，并支持按固定 horizon 采样轨迹片段。
     """
-
-    def __init__(self, env='pointmaze-umaze-v1', horizon=64,
+    def __init__(self, env=['mujoco/hopper/medium-v0'], horizon=64,
         normalizer='LimitsNormalizer', preprocess_fns=[], max_path_length=1000,
         max_n_episodes=10000, termination_penalty=0, use_padding=True, seed=None):
         """
         初始化 MinariSequenceDataset。
 
         参数:
-            env (str): Minari 数据集名称。
+            env (list[str]): Minari 数据集名称的列表 (例如 ['mujoco/hopper/medium-v0', 'mujoco/hopper/expert-v0'])。
             horizon (int): 采样的轨迹片段长度 (T)。
-            normalizer (str): 归一化器类型。(例如 'LimitsNormalizer', 'GaussianNormalizer')。
+            normalizer (str): 归一化器类型。
             preprocess_fns (list): 预处理函数列表。
             max_path_length (int): 最大路径长度。
-            max_n_episodes (int): 加载的最大 episode 数量。
+            max_n_episodes (int): 加载的最大 episode 总数量 (所有数据集之和)。
             termination_penalty (float): 提前终止的惩罚值。
-            use_padding (bool): 是否使用填充。如果为 True，允许采样超出 episode 实际长度的片段 (用零填充)。
+            use_padding (bool): 是否使用填充。
             seed (int): 随机种子。
         """
-        self.preprocess_fn = get_preprocess_fn(preprocess_fns, env)
-
-        # 加载 Minari 数据集并恢复环境
-        minari_dataset = minari.load_dataset(env)
-        # self.env = minari_dataset.recover_environment()
-        # self.env.seed(seed)
-
+        # 兼容性处理：如果用户传的是单个字符串，转为列表
+        if isinstance(env, str):
+            env_list = [env]
+        else:
+            env_list = env
+        
+        self.env_list = env_list
         self.horizon = horizon
         self.max_path_length = max_path_length
         self.use_padding = use_padding
 
-        # 从 Minari 数据集创建迭代器
-        itr = minari_dataset.iterate_episodes()
-
-        # 初始化 ReplayBuffer 并加载数据
+        # 初始化 ReplayBuffer (只初始化一次，用于存放所有环境的数据)
+        # 注意：ReplayBuffer 通常会在第一次 add_path 时确定维度，因此请确保 env_list 中的所有环境维度一致
         fields = ReplayBuffer(max_n_episodes, max_path_length, termination_penalty)
-        for i, episode in enumerate(itr):
-            if i >= max_n_episodes:
-                print(f'[ datasets/sequence ] Reached max episodes: {max_n_episodes}')
+        
+        total_episodes_loaded = 0 # 全局计数器
+
+        # --- 1. 遍历数据集列表 ---
+        for env_name in env_list:
+            if total_episodes_loaded >= max_n_episodes:
+                print(f'[ datasets/sequence ] Reached max total episodes: {max_n_episodes}')
                 break
+            
+            print(f'[ datasets/sequence ] Loading dataset: {env_name}')
 
-            # 将 Minari episode 格式转换为 ReplayBuffer 期望的字典格式
-            # 注意：Minari 使用 'terminations' 和 'truncations'，我们将其映射到 'terminals' 和 'timeouts'
-            # minari 中 observations 序列长度比 actions 多 1
-            assert episode.observations.shape[0] == episode.actions.shape[0] + 1, \
-                f'Observations length {episode.observations.shape[0]} != Actions length {episode.actions.shape[0]} + 1'
-            path = {
-                'observations': episode.observations[:-1],
-                'actions': episode.actions,
-                'rewards': episode.rewards.reshape(-1, 1),
-                'terminals': episode.terminations.reshape(-1, 1),
-                'timeouts': episode.truncations.reshape(-1, 1),
-            }
-            path = self.preprocess_fn(path)
-            fields.add_path(path)
+            # 针对当前环境获取预处理函数 (假设 get_preprocess_fn 依赖环境名)
+            current_preprocess_fn = get_preprocess_fn(preprocess_fns, env_name)
+
+            # 加载 Minari 数据集
+            minari_dataset = minari.load_dataset(env_name)
+            
+            # 从 Minari 数据集创建迭代器
+            itr = minari_dataset.iterate_episodes()
+
+            # --- 2. 遍历当前数据集的 episodes ---
+            for i, episode in enumerate(itr):
+                # 检查全局总数限制
+                if total_episodes_loaded >= max_n_episodes:
+                    break
+
+                # 将 Minari episode 格式转换为 ReplayBuffer 期望的字典格式
+                # 注意：Minari 使用 'terminations' 和 'truncations'，我们将其映射到 'terminals' 和 'timeouts'
+                # minari 中 observations 序列长度比 actions 多 1
+                assert episode.observations.shape[0] == episode.actions.shape[0] + 1, \
+                    f'Observations length {episode.observations.shape[0]} != Actions length {episode.actions.shape[0]} + 1'
+                
+                path = {
+                    'observations': episode.observations[:-1],
+                    'actions': episode.actions,
+                    'rewards': episode.rewards.reshape(-1, 1),
+                    'terminals': episode.terminations.reshape(-1, 1),
+                    'timeouts': episode.truncations.reshape(-1, 1),
+                }
+                
+                # 使用当前环境对应的预处理函数
+                path = current_preprocess_fn(path)
+                
+                # 添加到统一的 Buffer 中
+                fields.add_path(path)
+                
+                total_episodes_loaded += 1
+                
         fields.finalize()
+        print(f'[ datasets/sequence ] Total episodes loaded: {total_episodes_loaded}')
 
-        # 初始化归一化器
+        # 初始化归一化器 (基于合并后的数据)
         self.normalizer = DatasetNormalizer(fields, normalizer, path_lengths=fields['path_lengths'])
+        
         # 创建采样索引
         self.indices = self.make_indices(fields.path_lengths, horizon)
 
@@ -83,7 +111,8 @@ class MinariSequenceDataset(torch.utils.data.Dataset):
         self.fields = fields
         self.n_episodes = fields.n_episodes
         self.path_lengths = fields.path_lengths
-        # 对数据进行归一化
+        
+        # 对所有数据进行归一化
         self.normalize()
 
         print(fields)
@@ -159,10 +188,19 @@ class MinariSequenceDataset(torch.utils.data.Dataset):
         actions = self.fields.normed_actions[path_ind, start:end]
 
         conditions = self.get_conditions(observations)
-        trajectories = np.concatenate([actions, observations], axis=-1)  # [horizon, action_dim + observation_dim]
+
+        # ---------------- [修改开始] ----------------
+        # 自动判断使用 torch.cat 还是 np.concatenate
+        if torch.is_tensor(actions):
+            # GPU/Tensor 模式
+            trajectories = torch.cat([actions, observations], dim=-1)
+        else:
+            # CPU/Numpy 模式
+            trajectories = np.concatenate([actions, observations], axis=-1)
+        # ---------------- [修改结束] ----------------
+
         batch = Batch(trajectories, conditions)
         return batch
-    
 
 
 class ValueDataset(MinariSequenceDataset):

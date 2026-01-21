@@ -72,11 +72,20 @@ class Trainer(object):
         self.gradient_accumulate_every = gradient_accumulate_every
 
         self.dataset = dataset
+
+        num_workers = 1
+        pin_memory = True
         self.dataloader = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=train_batch_size, num_workers=1, shuffle=True, pin_memory=True
+            self.dataset, 
+            batch_size=train_batch_size, 
+            num_workers=num_workers, 
+            shuffle=True, 
+            pin_memory=pin_memory
         ))
+        
+        # Vis loader usually small, keep default or optimize similarly if needed
         self.dataloader_vis = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=1, num_workers=0, shuffle=True, pin_memory=True
+            self.dataset, batch_size=1, num_workers=0, shuffle=True, pin_memory=pin_memory
         ))
         self.renderer = renderer
         self.optimizer = torch.optim.Adam(diffusion_model.parameters(), lr=train_lr)
@@ -119,6 +128,7 @@ class Trainer(object):
 
                 # 如果是 poly 约束，从dataset中采样初始分布
                 if hasattr(self.dataset, "raw_A"):
+                    # 确保 generate_prior_data 使用正确的 device
                     x0, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0], device=self.device)
                     loss, infos = self.model.loss(*batch, x0)
                 else:
@@ -178,68 +188,61 @@ class Trainer(object):
         self.model.load_state_dict(data['model'])
         self.ema_model.load_state_dict(data['ema'])
 
-    #-----------------------------------------------------------------------------#
-    #--------------------------------- rendering ---------------------------------#
-    #-----------------------------------------------------------------------------#
 
-    def render_reference(self, batch_size=10):
-        '''
-            renders training points
-        '''
+class Go2Trainer(Trainer):
 
-        ## get a temporary dataloader to load a single batch
-        dataloader_tmp = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=batch_size, num_workers=0, shuffle=True, pin_memory=True
-        ))
-        batch = dataloader_tmp.__next__()
-        dataloader_tmp.close()
+    def train(self, n_train_steps, use_cosine_scheduler=False, use_grad_clip=False, grad_clip_norm=1.0, writer=None):
 
-        ## get trajectories and condition at t=0 from batch
-        trajectories = to_np(batch.trajectories)
-        conditions = to_np(batch.conditions[0])[:,None]
-
-        ## [ batch_size x horizon x observation_dim ]
-        normed_observations = trajectories[:, :, self.dataset.action_dim:]
-        observations = self.dataset.normalizer.unnormalize(normed_observations, 'observations')
-
-        savepath = os.path.join(self.logdir, f'_sample-reference.png')
-        self.renderer.composite(savepath, observations)
-
-    def render_samples(self, batch_size=2, n_samples=2):
-        '''
-            renders samples from (ema) diffusion model
-        '''
-        for i in range(batch_size):
-
-            ## get a single datapoint
-            batch = self.dataloader_vis.__next__()
-            conditions = to_device(batch.conditions, 'cuda:0')
-
-            ## repeat each item in conditions `n_samples` times
-            conditions = apply_dict(
-                einops.repeat,
-                conditions,
-                'b d -> (repeat b) d', repeat=n_samples,
+        # T_max 设置为 n_train_steps，意味着在训练结束时 LR 会降到最低 (默认 0)
+        if use_cosine_scheduler:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer, 
+                T_max=n_train_steps, 
+                eta_min=1e-6
             )
 
-            ## [ n_samples x horizon x (action_dim + observation_dim) ]
-            samples = self.ema_model(conditions)
-            trajectories = to_np(samples.trajectories)
+        timer = Timer()
+        for step in range(n_train_steps):
+            for i in range(self.gradient_accumulate_every):
+                batch = next(self.dataloader)
+                batch = batch_to_device(batch, device=self.device)
 
-            ## [ n_samples x horizon x observation_dim ]
-            normed_observations = trajectories[:, :, self.dataset.action_dim:]
+                x0, _, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0],
+                            A_0=batch.A[:, 0:1], b_0=batch.b[:, 0:1], contact_0=batch.contact[:, 0:1], device=self.device)
+                loss, infos = self.model.loss(*batch, x0)
 
-            # [ 1 x 1 x observation_dim ]
-            normed_conditions = to_np(batch.conditions[0])[:,None]
+                # # 如果是 poly 约束，从dataset中采样初始分布
+                # if hasattr(self.dataset, "raw_A"):
+                #     # 确保 generate_prior_data 使用正确的 device
+                #     x0, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0], device=self.device)
+                #     loss, infos = self.model.loss(*batch, x0)
+                # else:
+                #     loss, infos = self.model.loss(*batch)
 
-            ## [ n_samples x (horizon + 1) x observation_dim ]
-            normed_observations = np.concatenate([
-                np.repeat(normed_conditions, n_samples, axis=0),
-                normed_observations
-            ], axis=1)
+                loss = loss / self.gradient_accumulate_every
+                loss.backward()
 
-            ## [ n_samples x (horizon + 1) x observation_dim ]
-            observations = self.dataset.normalizer.unnormalize(normed_observations, 'observations')
+            if use_grad_clip:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_norm)
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            if use_cosine_scheduler:
+                scheduler.step()
 
-            savepath = os.path.join(self.logdir, f'sample-{self.step}-{i}.png')
-            self.renderer.composite(savepath, observations)
+            if self.step % self.update_ema_every == 0:
+                self.step_ema()
+
+            if self.step % self.save_freq == 0:
+                label = self.step // self.label_freq * self.label_freq
+                self.save(label)
+
+            if self.step % self.log_freq == 0:
+                infos_str = ' | '.join([f'{key}: {val:8.4f}' for key, val in infos.items()])
+                current_lr = self.optimizer.param_groups[0]['lr']
+                print(f'{self.step}: {loss:8.4f} | {infos_str} | lr: {current_lr:8.6f} | t: {timer():8.4f}', flush=True)
+
+                if writer:
+                    writer.add_scalar("Train/Loss", loss.item(), step)
+                    writer.add_scalar("Train/LR", current_lr, step)
+
+            self.step += 1

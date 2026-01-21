@@ -2,9 +2,22 @@ import collections
 import numpy as np
 import torch
 import pdb
+import random
+import os
 
 DTYPE = torch.float
 DEVICE = 'cuda:0'
+
+
+def set_all_seed(seed: int):
+	# 1. 基础随机种子
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 
 #-----------------------------------------------------------------------------#
 #------------------------------ numpy <--> torch -----------------------------#

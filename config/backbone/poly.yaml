@@ -9,7 +9,7 @@ num_cons: ${num_cons}
 max_seq: ${horizon}
 embed_dim: 128
 share_traj_encoder: true
-cons_begin_seq_idx: 1  # 第一个索引是condition
+cons_begin_seq_idx: 1  # 从哪一个horizon索引开始考虑约束
 num_rays: 1
 num_heads_cons: 4
 num_layers_cons: 2

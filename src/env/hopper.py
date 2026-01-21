@@ -11,23 +11,25 @@ class HopperEnv:
     def __init__(
             self,
             height_limit: float = 1.5,
-            use_cpx: bool = False,
+            use_cpx: int = 0,
             vel_scale: float = 0.05,
+            height_min: float = 0.8,
+            v_max: float = 2.5,
+            v_min: float = -2.5
     ):
 
         self.env = gymnasium.make("Hopper-v5", render_mode="rgb_array")
         self.height_limit = height_limit
-        self.use_cpx = use_cpx # 是否使用复杂约束
+        self.use_cpx = use_cpx # 是否使用复杂约束 0 不使用 1 使用simple 2 使用hard
         self.vel_scale = vel_scale
+        self.height_min = height_min
+        self.v_max = v_max
+        self.v_min = v_min
         print(f"Env Hopper use complex constraints: {self.use_cpx}")
 
-        # [新增] 保存初始状态，用于在绘图函数中通过观测值还原环境状态
-        self.env.reset()
-        self.init_qpos = self.env.unwrapped.data.qpos.ravel().copy()
-        self.init_qvel = self.env.unwrapped.data.qvel.ravel().copy()
 
 
-    def safety_check(self, traj_obs: np.array, ignore_first_horizon=True, eps=5e-2) -> np.ndarray:
+    def safety_check(self, traj_obs: np.array, ignore_first_horizon=True, eps=1e-3) -> np.ndarray:
         """
         检查轨迹是否满足高度限制约束。
         
@@ -51,13 +53,20 @@ class HopperEnv:
             heights = heights[:, 1:]
             vels = vels[:, 1:]
 
-        if self.use_cpx:
+        if self.use_cpx == 2.0:
+            flag = (heights + self.vel_scale * vels <= self.height_limit + eps) & \
+                (heights >= self.height_min - eps) & \
+                (vels >= self.v_min - eps) & \
+                (vels <= self.v_max + eps)
+            is_safe = np.all(flag, axis=1)
+        elif self.use_cpx == 1.0:
             is_safe = np.all(heights + self.vel_scale * vels <= self.height_limit + eps, axis=1)
         else:
-            is_safe = np.all(heights <= self.height_limit + eps, axis=1)
-        
+            is_safe = (np.ones(heights.shape[0]) > 0)
+
         return is_safe
     
+
     def _get_x_pos(self):
         """辅助函数：直接从 MuJoCo 模拟器数据中获取当前 X 轴绝对位置"""
         return self.env.unwrapped.data.qpos[0]
@@ -158,7 +167,6 @@ class HopperEnv:
             flag = self.safety_check(obs_traj.reshape(1, -1, obs_dim), ignore_first_horizon=False)[0]
             if not flag:
                 unsafe_cnt += 1
-        
         safety_ratio = float(total_traj - unsafe_cnt) / total_traj if total_traj > 0 else 0.0
 
         metrics = {

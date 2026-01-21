@@ -8,7 +8,7 @@ defaults:
 dataset:
   _target_: src.datasets.constrained_dataset.ConstrainedMinariDataset
   # 约束相关
-  obs_constrained_idx: ${obs_constrained_idx}
+  full_constrained_idx: ${full_constrained_idxs}
   single_A: ${single_A}
   single_b: ${single_b}
 
@@ -21,9 +21,17 @@ dataset:
   termination_penalty: 0
   use_padding: false
 
+algorithm:
+  action_weight: 10.0
+  loss_discount: 0.99
+
 env:
-  use_cpx: true
+  use_cpx: ${use_cpx}
   vel_scale: ${vel_scale}
+  height_limit: ${height_limit}
+  height_min: ${height_min}
+  v_max: ${v_max}
+  v_min: ${v_min}
 
 backbone:
   share_traj_encoder: true
@@ -41,15 +49,13 @@ trainer:
   step_start_ema: 2000
   update_ema_every: 100
   log_freq: 200
-  save_freq: 100000
+  save_freq: 200000
   label_freq: ${trainer.save_freq}
   save_parallel: false
   
 # 不加 guide policy config
 policy:
   _target_: src.sampling.policies.PolyFlowPolicy
-  # diffusion_model: null
-  # normalizer: null
   preprocess_fns: []
 
 
@@ -75,7 +81,7 @@ algo_name: polyflow
 run_name: train
 
 
-device: "cuda:1"
+device: "cuda:5"
 seed: 42
 dataset_minari_name: "mujoco/hopper/medium-v0"
 horizon: 100  # 如果要使用 unet 要保证 horizon 能够被8整除
@@ -89,11 +95,14 @@ steps: 10  # 采样步数
 iteration: 1000000  # 训练step
 
 height_limit: 1.6
+height_min: 0.7
+v_max: 3
+v_min: -3
 vel_scale: 0.01
-obs_constrained_idx: [0, 6] # 对应hopper 的z height, z vel
+use_cpx: 1
 full_constrained_idxs: [3, 9] # 对应hopper 的z height, z vel
 single_A: [[1, 0.01], [1, 0], [-1, 0], [0, 1], [0, -1]]
-single_b: [1.6, 1.6, -0.7, 5, 5]
+single_b: [1.6, 1.6, -0.7, 3, 3]
 num_cons: 5
 
 
