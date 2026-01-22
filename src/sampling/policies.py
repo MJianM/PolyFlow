@@ -160,13 +160,14 @@ class Go2PolyFlowPolicy(GuidedPolicy):
 
         self.dataset = dataset
 
-    def __call__(self, conditions, A_0, b_0, contact_0, batch_size=1, verbose=True):
+    def __call__(self, conditions, A_0, b_0, contact_0, vertex_0, batch_size=1, verbose=True):
         """
         Docstring for __call__
         
-        A_0: (batch, 1, 4, num_cons, 3)
-        b_0: (batch, 1, 4, num_cons,)
-        contact_0: (batch, 1, 4,)
+        A_0: (batch, 1, 4, num_cons, 3) Tensor cpu
+        b_0: (batch, 1, 4, num_cons,) Tensor cpu
+        contact_0: (batch, 1, 4,) Tensor cpu
+        vertex_0: (batch, 1, 4, 3,) Tensor cpu
 
         """
         
@@ -189,7 +190,7 @@ class Go2PolyFlowPolicy(GuidedPolicy):
         start_time = time.time()
         # ----------------
 
-        x0, A, b, contact = self.dataset.generate_prior_data(batch_size=batch_size, A_0=A_0_normed.to(self.device), b_0=b_0_normed.to(self.device), contact_0=contact_0.to(self.device), device=self.device)
+        x0, A, b, contact = self.dataset.generate_prior_data(batch_size=batch_size, A_0=A_0_normed.to(self.device), b_0=b_0_normed.to(self.device), contact_0=contact_0.to(self.device), device=self.device, h_0=vertex_0.to(self.device))
         if self.guide is None:
             samples, b_min = self.diffusion_model(conditions, verbose=verbose, A=A, b=b, contact=contact, x0=x0, **self.sample_kwargs)  # debug
         else:

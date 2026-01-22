@@ -1131,7 +1131,7 @@ class DiscreteFlowMatching(FlowMatching):
 
 class DiscreteFlowMatchingGo2(FlowMatching):
     
-    def loss(self, x, cond, A, b, contact, x0):
+    def loss(self, x, cond, A, b, contact, vertex, x0):
         """
         compute batch discrete flow matching loss
         
@@ -1141,6 +1141,7 @@ class DiscreteFlowMatchingGo2(FlowMatching):
         :param A: (batch, horizon, 4, num_cons, 3)
         :param b: (batch, horizon, 4, num_cons)
         :param contact: (batch, horizon, 4)
+        :param vertex: (batch, horizon, 4, 3)
         :param x0: (batch, horizon, act+obs) 初始分布
         return: 
             loss: 

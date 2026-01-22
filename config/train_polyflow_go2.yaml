@@ -5,7 +5,8 @@ defaults:
   - dataset: sequence_go2
   - _self_
 
-
+dataset:
+  initial_sample_mode: 'approx' # qp
 
 algorithm:
   action_weight: 10.0
@@ -55,16 +56,16 @@ eval:
 
 env_name: go2
 algo_name: polyflow
-run_name: train
+run_name: train_approx
 
 
-device: "cuda:3"
+device: "cuda:7"
 seed: 42
 
-file_path: 'data/bound_go2_traj_data.npz'
+file_path: 'data/bound_go2_traj_data_1.npz'
 
 horizon: 50  # 如果要使用 unet 要保证 horizon 能够被8整除
-max_seq: 1000
+max_seq: 900
 obs_dim: 49
 act_dim: 12
 transition_dim: 61

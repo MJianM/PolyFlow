@@ -21,7 +21,7 @@ from src.utils.arrays import apply_dict, set_all_seed
 log = logging.getLogger(__name__)
 
 
-class Go2PolyFlowPolicy:
+class Go2PolyFlowModelPolicy:
     def __init__(self, cfg: DictConfig):
 
         # 读取环境配置并初始化环境
@@ -86,7 +86,11 @@ class Go2PolyFlowPolicy:
         true_traj = policy.normalizer.unnormalize(true_traj_normed, 'observations')
         true_act_traj_normed = true_joint_normed[:, :, :dataset.action_dim]
         true_act_traj = policy.normalizer.unnormalize(true_act_traj_normed, 'actions')
-        
+        true_vertex_normed = batch.vertex # (B, H, 4, 3)
+        true_vertex = policy.normalizer.unnormalize(true_vertex_normed.reshape(-1, 12), 'actions')
+        true_vertex = true_vertex.reshape(-1, cfg.horizon, 4, 3)
+
+
         true_cond = apply_dict(policy.normalizer.unnormalize, true_cond_normed, 'observations')
         true_A_normed = batch.A
         true_b_normed = batch.b
@@ -99,7 +103,7 @@ class Go2PolyFlowPolicy:
         with torch.no_grad():
             # 用同样的 batch 跑一次，不计入时间
             # 这一步会触发 CuDNN benchmark, Kernel loading, Allocator setup
-            policy(true_cond, A_0=true_A[:, 0:1], b_0=true_b[:, 0:1], contact_0=true_contact[:, 0:1], batch_size=batch_size)
+            policy(true_cond, A_0=true_A[:, 0:1], b_0=true_b[:, 0:1], contact_0=true_contact[:, 0:1], vertex_0=true_vertex[:, 0:1], batch_size=batch_size)
         # === 正式测量 ===
         log.info("Running benchmark pass...")
 
@@ -108,12 +112,21 @@ class Go2PolyFlowPolicy:
         self.dataset = dataset
         self.val_loader = val_loader
 
-    def __call__(self, obs_0, A_0, b_0, contact_0):
+    def __call__(self, obs_0, A_0, b_0, contact_0, h, qpos, qvel, default_q, kp, kd):
         """
         obs_0: (B, obs_dim) torch.Tensor 当前时刻的obs
         A_0: (B, 4, num_cons, 3) torch.Tensor 当前时刻的线性不等式约束矩阵
         b_0: (B, 4, num_cons) torch.Tensor 当前时刻的线性不等式约束向量
         contact_0: (B, 4,) torch.Tensor 当前时刻的接触状态
+        h: (B, 4, 3) torch.Tensor 当前时刻四条腿的非线性项
+        qpos: (B, 12) torch.Tensor
+        qvel: (B, 12) torch.Tensor
+        default_q: (12, ) torch.Tensor
+        kp: (12, ) torch.Tensor
+        kd: (12, ) torch.Tensor
+
+        return:
+            action: (B, act_dim) numpy.array
         """
 
         batch_size = obs_0.shape[0]
@@ -125,16 +138,24 @@ class Go2PolyFlowPolicy:
             b_input = b_0.unsqueeze(1)  # (B, 1, 4, num_cons)
             contact_input = contact_0.unsqueeze(1)  # (B, 1, 4)
 
+            # 计算vertex
+            tau_bias = kp.unsqueeze(0) * (default_q.unsqueeze(0) - qpos) - kd.unsqueeze(0) * qvel  # (B, 12)
+            vertex = (h.reshape(batch_size, -1) - tau_bias) / kp.unsqueeze(0) # (B, 12)
+            vertex_input = vertex.reshape(batch_size, 1, 4, 3) # (B, 1, 4, 3)
+
+
             # action: [B, act_dim]
             # trajectories.actions [B, H, A]
             # trajectories.observations [B, H, O]
             # trajectories.values [B]
             # diffusion_obs [B, diffusion_steps, H, O]
             action, trajectories, diffusion_obs, _, total_time, avg_per_step_time = self.policy(
-                cond={0: obs_0}, A_0=A_input, b_0=b_input, contact_0=contact_input, batch_size=batch_size
+                cond={0: obs_0.cpu()}, A_0=A_input.cpu(), b_0=b_input.cpu(), contact_0=contact_input.cpu(), 
+                vertex_0=vertex_input.cpu(), batch_size=batch_size
             )
 
-        return action
+
+        return action / self.dataset.action_scale
         
 
 
@@ -148,7 +169,7 @@ def main(cfg: DictConfig):
             set_all_seed(seed)
             log.info(f"Set random seed to: {seed}")
 
-        policy = Go2PolyFlowPolicy(cfg)
+        policy = Go2PolyFlowModelPolicy(cfg)
 
 
 

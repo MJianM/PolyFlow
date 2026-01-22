@@ -208,7 +208,7 @@ class Go2Trainer(Trainer):
                 batch = batch_to_device(batch, device=self.device)
 
                 x0, _, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0],
-                            A_0=batch.A[:, 0:1], b_0=batch.b[:, 0:1], contact_0=batch.contact[:, 0:1], device=self.device)
+                            A_0=batch.A[:, 0:1], b_0=batch.b[:, 0:1], contact_0=batch.contact[:, 0:1], device=self.device, h_0=batch.vertex[:, 0:1])
                 loss, infos = self.model.loss(*batch, x0)
 
                 # # 如果是 poly 约束，从dataset中采样初始分布
@@ -244,5 +244,6 @@ class Go2Trainer(Trainer):
                 if writer:
                     writer.add_scalar("Train/Loss", loss.item(), step)
                     writer.add_scalar("Train/LR", current_lr, step)
+                    writer.add_scalar("Train/Loss_a0", infos['a0_loss'].item(), step)
 
             self.step += 1

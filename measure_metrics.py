@@ -24,25 +24,26 @@ from plot_walker import calculate_halfcheetah_traj_metric
 #     height_min=0.7,
 # )
 
-# # hoppercpx2
-# calculate_traj_metric(
-#     traj_path_list=[
-#         'outputs/hoppercpx2/flow_time_step200/42_2026-01-17_22-07-24/final_traj.npz',
-#         'outputs/hoppercpx2/polyflow_time/42_2026-01-18_11-21-32/final_traj.npz',
-#         'outputs/hoppercpx2/RoS_time/42_2026-01-17_21-37-15/final_traj.npz',
-#         'outputs/hoppercpx2/gaugeflow_time_step200/42_2026-01-18_11-28-18/final_traj.npz',
-#         'outputs/hoppercpx2/polyflow_time_fixcons/42_2026-01-20_13-24-48/final_traj.npz'
+# hoppercpx2
+calculate_traj_metric(
+    traj_path_list=[
+        'outputs/hoppercpx2/flow_time_step200/42_2026-01-17_22-07-24/final_traj.npz',
+        'outputs/hoppercpx2/polyflow_time/42_2026-01-18_11-21-32/final_traj.npz',
+        'outputs/hoppercpx2/safeflow_time_step200/42_2026-01-21_12-28-05/final_traj.npz',
+        'outputs/hoppercpx2/RoS_time/42_2026-01-17_21-37-15/final_traj.npz',
+        'outputs/hoppercpx2/gaugeflow_time_step200/42_2026-01-18_11-28-18/final_traj.npz',
+        'outputs/hoppercpx2/polyflow_time_fixcons/42_2026-01-20_13-24-48/final_traj.npz'
         
-#     ],
-#     label_list=[
-#         'Flow', 'PolyFlow', 'RoSD', 'GaugeFlow', 'PolyFlowFix'
-#     ],
-#     height_limit=1.5,
-#     vel_scale=0.01,
-#     obs_v_idx=6,
-#     v_limit=2.5,
-#     height_min=0.8,
-# )
+    ],
+    label_list=[
+        'Flow', 'PolyFlow', 'SafeFlow', 'RoSD', 'GaugeFlow', 'PolyFlowFix'
+    ],
+    height_limit=1.5,
+    vel_scale=0.01,
+    obs_v_idx=6,
+    v_limit=2.5,
+    height_min=0.8,
+)
 
 
 # # walkercpx
@@ -90,14 +91,14 @@ from plot_walker import calculate_halfcheetah_traj_metric
 # )
 
 
-calculate_halfcheetah_traj_metric(
-    traj_path_list=[
-        # 'outputs/halfcheetah/flow_time_step100/42_2026-01-20_16-49-45/final_traj.npz',
-        'outputs/halfcheetah/polyflow_time_boltzmann80/42_2026-01-21_12-35-03/final_traj.npz'
-    ],
-    label_list=[
-        'Boltzmann',
-    ],
-    leg_limit=1.2,
-    torsion_limit=0.8
-)
+# calculate_halfcheetah_traj_metric(
+#     traj_path_list=[
+#         # 'outputs/halfcheetah/flow_time_step100/42_2026-01-20_16-49-45/final_traj.npz',
+#         'outputs/halfcheetah/polyflow_time_boltzmann80/42_2026-01-21_12-35-03/final_traj.npz'
+#     ],
+#     label_list=[
+#         'Boltzmann',
+#     ],
+#     leg_limit=1.2,
+#     torsion_limit=0.8
+# )

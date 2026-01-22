@@ -9,8 +9,282 @@ from .normalization import DatasetNormalizer
 from .buffer import ReplayBuffer
 from src.utils.chebyshev_center import chebyshev_center_lp, uniform_sample_in_ball
 
+def get_approx_center_least_squares(A, b, h, factor=0.5):
+    """
+    使用 [最小二乘法] 代替 [法向量求和] 来寻找射线方向。
+    这能更好地处理扁平或扭曲的锥体，找到更准确的角平分线方向。
+    """
+    if not isinstance(A, torch.Tensor):
+        A = torch.tensor(A, dtype=torch.float32)
+        b = torch.tensor(b, dtype=torch.float32)
+        h = torch.tensor(h, dtype=torch.float32)
+    
+    device = A.device
+    dtype = A.dtype
+    
+    # --- 1. 预处理 ---
+    # 归一化 A，保证数值稳定性 (这一步对最小二乘也很重要)
+    row_norms = torch.norm(A, p=2, dim=2, keepdim=True).clamp(min=1e-9)
+    A_norm = A / row_norms
+    
+    # 计算局部 b (用于识别顶点平面)
+    val_at_h = torch.einsum('bni, bi -> bn', A, h)
+    b_local = torch.relu(b - val_at_h) # ReLU 防止负值干扰
+    
+    # 识别 Tip Planes (b_local 接近 0 的平面)
+    epsilon = 5e-4
+    mask_tip = (b_local < epsilon).float().unsqueeze(-1) # (B, N, 1)
+    
+    # --- 2. 核心改进: 最小二乘方向估计 ---
+    # 我们只关心 Tip Planes，其他平面的行我们要屏蔽掉 (乘0)
+    A_tip = A_norm * mask_tip # (B, N, 3)
+    
+    # 目标: 求解 A_tip * d = -1
+    # 也就是: A_tip^T * A_tip * d = - A_tip^T * 1
+    
+    # 构建 Hessian 矩阵 H = A^T A (3x3)
+    # (B, 3, N) @ (B, N, 3) -> (B, 3, 3)
+    H = torch.bmm(A_tip.transpose(1, 2), A_tip)
+    
+    # 添加阻尼项 (Ridge Regularization) 防止矩阵奇异
+    # 特别是当平面数量 < 3 时，或者平面共线时，H 不可逆
+    lambda_I = 1e-3 * torch.eye(3, device=device, dtype=dtype).unsqueeze(0)
+    H_reg = H + lambda_I
+    
+    # 构建右侧向量 g = - A^T * 1
+    # sum(A_tip, dim=1) 等价于 A^T * 1
+    g = -torch.sum(A_tip, dim=1).unsqueeze(-1) # (B, 3, 1)
+    
+    # 求解线性方程 H_reg * d = g
+    # torch.linalg.solve 比手动求逆更稳
+    direction = torch.linalg.solve(H_reg, g).squeeze(-1) # (B, 3)
+    
+    # 归一化方向
+    direction = direction / torch.norm(direction, dim=1, keepdim=True).clamp(min=1e-9)
 
-ConstrainedContactBatch = namedtuple('ConstrainedContactBatch', 'trajectories conditions A b contact')
+    # --- 3. 射线投射 (Ray Casting) ---
+    # (这部分逻辑保持不变，依然是撞击检测)
+    
+    projections = torch.einsum('bni, bi -> bn', A, direction)
+    valid_proj_mask = (projections > 1e-9) # 检查所有前方平面
+    
+    safe_projections = torch.where(valid_proj_mask, projections, torch.tensor(1.0, device=device, dtype=dtype))
+    calculated_t = b_local / safe_projections
+    
+    inf_tensor = torch.full_like(b, float('inf'))
+    t_values = torch.where(valid_proj_mask, calculated_t, inf_tensor)
+    
+    t_hit = torch.min(t_values, dim=1)[0]
+    t_hit = torch.where(torch.isinf(t_hit), torch.tensor(1.0, device=device, dtype=dtype), t_hit)
+    
+    centers = h + direction * t_hit.unsqueeze(1) * factor
+    
+    return centers
+
+def get_approx_center_ray_torch(A, b, h, factor=0.4):
+    """
+    Batch 版本的近似切比雪夫中心求解 (PyTorch版)。
+    
+    参数:
+        A: (batch, num_cons, 3) FloatTensor, 约束矩阵
+        b: (batch, num_cons) FloatTensor, 约束向量
+        h: (batch, 3) FloatTensor, 已知的多面体顶点坐标
+        factor: float, 射线撞击距离的缩放因子 (0~1)
+        
+    返回:
+        centers: (batch, 3) FloatTensor
+    """
+    # 确保输入是 tensor 且在同一设备
+    if not isinstance(A, torch.Tensor):
+        A = torch.tensor(A, dtype=torch.float32)
+        b = torch.tensor(b, dtype=torch.float32)
+        h = torch.tensor(h, dtype=torch.float32)
+        
+    device = A.device
+    dtype = A.dtype
+    epsilon = 1e-3
+    
+    # --- 步骤 1: 坐标系平移 (Shift to Local Frame) ---
+    # 计算 h 在每个平面上的投影值: (batch, num_cons)
+    # val_at_h = sum(A * h, axis=-1)
+    val_at_h = torch.einsum('bni, bi -> bn', A, h)
+    
+    # 计算相对于 h 的新约束向量 b'
+    b_local = b - val_at_h
+    
+    # --- 步骤 2: 识别构成顶点的平面 (Identify Tip Planes) ---
+    # 检查 b_local 是否接近 0
+    mask_tip = torch.abs(b_local) < epsilon
+    
+    flag = torch.sum(mask_tip, dim=-1) >= 3
+    if not torch.all(flag):
+        invalid_indices = torch.nonzero(~flag, as_tuple=False).squeeze(-1)
+        raise ValueError(f"[get_approx_center_ray_torch] Invalid polytope at batch indices: {invalid_indices.tolist()}. Less than 3 tip planes found.")
+
+    mask_base = ~mask_tip
+    
+    # --- 步骤 3: 计算射击方向 (Direction Calculation) ---
+    
+    # 计算每一行的 L2 范数: (batch, num_cons, 1)
+    # torch.norm 在 dim=2 上计算，保持维度
+    row_norms = torch.norm(A, p=2, dim=2, keepdim=True)
+    row_norms = torch.clamp(row_norms, min=1e-9) # 防止除零
+    
+    # 归一化 A
+    A_normalized = A / row_norms
+    
+    # 提取构成顶点的面的法向量
+    # 注意：需将 mask_tip (bool) 转换为 float 才能相乘
+    mask_tip_float = mask_tip.unsqueeze(-1).to(dtype) # (batch, num_cons, 1)
+    relevant_normals = A_normalized * mask_tip_float
+    
+    # 求和并取反 (指向内部): (batch, 3)
+    raw_direction = -torch.sum(relevant_normals, dim=1)
+    
+    # 归一化方向向量
+    dir_norm = torch.norm(raw_direction, p=2, dim=1, keepdim=True)
+    dir_norm = torch.clamp(dir_norm, min=1e-9)
+    direction = raw_direction / dir_norm  # (batch, 3)
+    
+    # --- 步骤 4: 计算射线撞击距离 (Ray Casting) ---
+    
+    # 计算方向在各平面法向量上的投影: (batch, num_cons)
+    projections = torch.einsum('bni, bi -> bn', A, direction)
+    
+    # 筛选有效的阻挡平面 (必须是 Base Plane 且 朝向射线)
+    valid_proj_mask = mask_base & (projections > epsilon)
+    
+    # 避免除零处理
+    # torch.where(condition, x, y)
+    safe_projections = torch.where(valid_proj_mask, projections, torch.tensor(1.0, device=device, dtype=dtype))
+    
+    # 计算 t (使用 b_local)
+    calculated_t = b_local / safe_projections
+    
+    # 初始化 t_values 为无穷大
+    inf_tensor = torch.full_like(b, float('inf'))
+    
+    # 应用 Mask: 有效位置填计算值，无效位置保持 inf
+    t_values = torch.where(valid_proj_mask, calculated_t, inf_tensor)
+    
+    # 寻找最近的撞击点
+    # 注意: torch.min(dim=1) 返回 (values, indices) named tuple
+    t_hit = torch.min(t_values, dim=1)[0] # 取 values
+    
+    # 处理无界情况 (inf -> default value 1.0)
+    t_hit = torch.where(torch.isinf(t_hit), torch.tensor(1.0, device=device, dtype=dtype), t_hit)
+    
+    # --- 步骤 5: 还原坐标 ---
+    # centers = h + direction * distance * factor
+    centers = h + direction * t_hit.unsqueeze(1) * factor
+    
+    return centers
+
+def compute_chebyshev_radius_batch(A, b, center):
+    """
+    计算给定中心点在多面体 A*x <= b 内的内切球半径 (Batch版)。
+    
+    参数:
+        A: (batch, num_cons, 3) 约束矩阵
+        b: (batch, num_cons) 约束向量
+        center: (batch, 3) 待检测的中心点
+        
+    返回:
+        radius: (batch,) 该点的内切球半径。
+                如果 radius < 0，表示该 center 在多面体外部。
+    """
+    # 确保输入是 tensor
+    if not isinstance(A, torch.Tensor):
+        A = torch.tensor(A, dtype=torch.float32)
+        b = torch.tensor(b, dtype=torch.float32)
+        center = torch.tensor(center, dtype=torch.float32)
+        
+    # 1. 计算 A 中每一行的 L2 范数 (用于归一化距离)
+    # shape: (batch, num_cons)
+    row_norms = torch.norm(A, p=2, dim=2)
+    
+    # 防止除零 (虽然几何约束中 a_i 通常不为0)
+    row_norms = torch.clamp(row_norms, min=1e-9)
+    
+    # 2. 计算投影 A * center
+    # input: (batch, num_cons, 3) * (batch, 3) -> (batch, num_cons)
+    projections = torch.einsum('bni, bi -> bn', A, center)
+    
+    # 3. 计算松弛变量 (Slack) / 原始距离
+    # slacks = b - A*x
+    slacks = b - projections
+    
+    # 4. 归一化距离 (真正的几何距离)
+    # dist = (b - A*x) / ||A||
+    dists = slacks / row_norms
+    
+    # 5. 取最小值作为半径
+    # 如果所有 dists >= 0，min(dists) 就是离最近墙壁的距离
+    # 如果有任意 dist < 0，min(dists) 表示违反最严重的约束的距离 (负值)
+    radius, _ = torch.min(dists, dim=1)
+
+    if not torch.all(radius >= -1e-6):
+        # 可选：检查 radius 是否合理
+        invalid_indices = torch.nonzero(radius < -1e-6, as_tuple=False).squeeze(-1)
+        raise ValueError(f"[compute_chebyshev_radius_batch] Some centers are outside the polytope at batch indices: {invalid_indices.tolist()}.")
+    
+    return radius
+
+def uniform_sample_in_ball_torch(center, radius):
+    """
+    在给定的球体中均匀采样点 (Batch版)。
+    
+    算法原理:
+    1. 方向采样: 使用高斯分布采样得到均匀分布在单位球面上的方向向量 (Muller's Method)。
+    2. 半径采样: 采样 u ~ Uniform(0, 1)，为了消除中心聚集效应，使得点在体积上均匀分布，
+       实际缩放系数应为 u^(1/3) (三维体积与半径的三次方成正比)。
+    
+    :param center: (batch, 3) Tensor, 球心坐标
+    :param radius: (batch, ) Tensor, 球体半径
+    :return: (batch, 3) Tensor, 采样得到的点坐标
+    """
+    # 1. 确保数据类型和设备一致
+    device = center.device
+    dtype = center.dtype
+    batch_size = center.shape[0]
+    
+    # 2. 生成随机方向 (Random Direction)
+    # 使用标准正态分布生成的向量，归一化后是均匀分布在单位球面上的
+    # shape: (batch, 3)
+    random_dirs = torch.randn_like(center)
+    
+    # 归一化得到单位向量
+    # dim=1 表示在空间维度 (x,y,z) 上求范数
+    # keepdim=True 保持形状为 (batch, 1) 以便广播
+    norms = torch.norm(random_dirs, p=2, dim=1, keepdim=True)
+    
+    # 加上极小值防止除以0 (虽然在高斯分布中概率极低)
+    unit_dirs = random_dirs / torch.clamp(norms, min=1e-9)
+    
+    # 3. 生成随机半径比例 (Random Radius Scale)
+    # 采样 u ~ Uniform(0, 1)
+    # shape: (batch, 1)
+    u = torch.rand((batch_size, 1), device=device, dtype=dtype)
+    
+    # 关键步骤：体积修正
+    # 为了保证在球体内均匀分布，半径 r 的概率密度函数应与 r^2 成正比
+    # 通过累积分布函数逆变换法 (Inverse CDF)，缩放系数应为 u^(1/3)
+    scale_factors = torch.pow(u, 1.0/3.0)
+    
+    # 4. 组合计算最终坐标
+    # result = center + radius * scale_factor * unit_direction
+    # 注意维度广播: 
+    # center: (B, 3)
+    # radius: (B,) -> unsqueeze -> (B, 1)
+    # scale_factors: (B, 1)
+    # unit_dirs: (B, 3)
+    
+    sampled_points = center + radius.unsqueeze(1) * scale_factors * unit_dirs
+    
+    return sampled_points
+
+
+ConstrainedContactBatch = namedtuple('ConstrainedContactBatch', 'trajectories conditions A b contact vertex')
 
 
 class LeggedRobotDataset(torch.utils.data.Dataset):
@@ -18,7 +292,7 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
     """
     def __init__(self, file_path, horizon=64,
         normalizer='LimitsNormalizer', preprocess_fns=[], max_path_length=1000,
-        max_n_episodes=5000, termination_penalty=0, use_padding=False, seed=None):
+        max_n_episodes=5000, termination_penalty=0, use_padding=False, seed=None, initial_sample_mode='qp', action_scale=0.25):
         """
         初始化 MinariSequenceDataset。
 
@@ -39,6 +313,9 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
         self.horizon = horizon
         self.max_path_length = max_path_length
         self.use_padding = use_padding
+        self.initial_sample_mode = initial_sample_mode
+        assert initial_sample_mode in ['qp', 'lp', 'approx'], "initial_sample_mode must be one of ['qp', 'lp', 'approx']"
+        self.action_scale = action_scale
 
         # 初始化 ReplayBuffer (只初始化一次，用于存放所有环境的数据)
         # 注意：ReplayBuffer 通常会在第一次 add_path 时确定维度，因此请确保 env_list 中的所有环境维度一致
@@ -52,17 +329,30 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
         
 
         obs_traj = npz_data['obs_traj'] # (batch, horizon, obs_dim)
-        act_traj = npz_data['act_traj'] # (batch, horizon, act_dim)
+        act_traj = npz_data['act_traj'] * self.action_scale # (batch, horizon, act_dim)
         u_traj = npz_data['u']   # (batch, horizon,)
         A_traj = npz_data['A']   # (batch, horizon, 4, num_cons, 3)
         b_traj = npz_data['b']   # (batch, horizon, 4, num_cons,)
         contact_mask_traj = npz_data['contact_mask'] # (batch, horizon, 4)
+        h_traj = npz_data['h'] # (batch, horizon, 4, 3) 非线性项
+        q_all_traj = npz_data['q'] # (batch, horizon, 19) 4+3+12 世界坐标系
+        v_all_traj = npz_data['v'] # (batch, horizon, 18) 3+3+12 世界坐标系
+        q_traj = q_all_traj[:, :, 7:] # (batch, horizon, 12) 仅关节角度
+        v_traj = v_all_traj[:, :, 6:] # (batch, horizon, 12) 仅关节角速度
         kp = npz_data['kp']      # (12, )
         kd = npz_data['kd']      # (12, )
         default_q = npz_data['defaut_q'] # (12,)
 
         batch_size = obs_traj.shape[0]
         horizon_length = obs_traj.shape[1]
+
+        # 计算约束凸多面体顶点 (batch, horizon, 4, 3)
+        kp_mat = kp.reshape(1, 1, 4, 3)
+        kd_mat = kd.reshape(1, 1, 4, 3)
+        default_q_mat = default_q.reshape(1, 1, 4, 3)
+        tau_bias = kp_mat * (default_q_mat - q_traj.reshape(batch_size, horizon_length, 4, 3)) - kd_mat * v_traj.reshape(batch_size, horizon_length, 4, 3)
+        vertex = (h_traj - tau_bias) / kp_mat
+
         self.kp = kp
         self.kd = kd
         self.default_q = default_q
@@ -138,6 +428,7 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
         # A, b 独立于 fields 存储
         self.raw_A = A_traj # (batch, horizon, 4, num_cons, 3)
         self.raw_b = b_traj # (batch, horizon, 4, num_cons,)
+        self.raw_vertex = vertex # (batch, horizon, 4, 3)
 
 
         fields.finalize()
@@ -163,6 +454,11 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
         # 对 A, b 进行归一化
         self.normed_A, self.normed_b = self.normalize_constraints(self.raw_A, self.raw_b)
         print(f"[Dataset] Constraints normalized using vectorized implementation.")
+
+        # 对 vertex 进行归一化
+        self.normed_vertex = self.normalizer(self.raw_vertex.reshape(self.n_episodes*self.max_path_length, -1), 'actions')
+        self.normed_vertex = self.normed_vertex.reshape(self.n_episodes, self.max_path_length, 4, 3)
+
         print(fields)
 
     def normalize(self, keys=['observations', 'actions']):
@@ -238,6 +534,7 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
         actions = self.fields.normed_actions[path_ind, start:end]
         A = self.normed_A[path_ind, start:end]
         b = self.normed_b[path_ind, start:end]
+        vertex = self.normed_vertex[path_ind, start:end]
         contact = self.fields.contact[path_ind, start:end]
         u = self.fields.u[path_ind, start:end]
 
@@ -258,7 +555,8 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
             conditions=conditions,
             A=A,
             b=b,
-            contact=contact
+            contact=contact,
+            vertex=vertex,
         )
         return batch
 
@@ -474,9 +772,102 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
     #     return sample_batch, A_out, b_out, contact_out
 
 
-    def generate_prior_data(self, batch_size, A_0, b_0, contact_0, device="cuda:0"):
+    def generate_prior_data(self, batch_size, A_0, b_0, contact_0, device, h_0=None):
+        """
+        生成满足归一化约束的可行域初始数据分布。
+         A_0: Tensor (batch, 1, 4, num_cons, 3)
+         b_0: Tensor (batch, 1, 4, num_cons, )
+         contact_0: (batch, 1, 4)
+         h_0: (batch, 1, 4, 3)
+        Returns:
+            sample_batch: Tensor (B, horizon, full_dim) 
+                对于约束受限部分，在对应的chebyshev球中均匀采样；对于无约束部分，在标准正态分布中采样
+                contact_0 = 1 对应的腿部关节受约束，contact_0 = 0 对应的腿部关节不受约束
+
+            A_batch: Tensor (B, horizon, 4, num_cons, 3)
+            b_batch: Tensor (B, horizon, 4, num_cons)
+            contact_batch: Tensor (B, horizon, 4)
+        """
+        if self.initial_sample_mode == 'qp':
+            return self.generate_prior_data_qp(batch_size, A_0, b_0, contact_0, device)
+        elif self.initial_sample_mode == 'approx':
+            return self.generate_prior_data_approx(batch_size, A_0, b_0, contact_0, device, h_0)
+        else:
+            raise ValueError(f"Unknown initial_sample_mode: {self.initial_sample_mode}")
+
+    def generate_prior_data_approx(self, batch_size, A_0, b_0, contact_0, device, h_0=None):
+        """
+        使用近似方法在 GPU 上批量求解 Chebyshev Center 并采样。
+         A_0: Tensor (batch, 1, 4, num_cons, 3)
+         b_0: Tensor (batch, 1, 4, num_cons, )
+         contact_0: (batch, 1, 4)
+         h_0: (batch, 1, 4, 3)
+        """
+        A_0 = A_0.to(device)
+        b_0 = b_0.to(device)
+        contact_0 = contact_0.to(device)
+        if h_0 is not None:
+            h_0 = h_0.to(device)
+
+        # ------------------------------------------------------------------
+        # 1. 初始化容器
+        # ------------------------------------------------------------------
+        sample_batch = torch.randn(batch_size, self.horizon, self.action_dim + self.observation_dim, device=device)
+        
+        # 填充 metadata
+        A_out = torch.zeros(batch_size, self.horizon, 4, A_0.shape[-2], 3, device=device)
+        b_out = torch.zeros(batch_size, self.horizon, 4, b_0.shape[-1], device=device)
+        contact_out = torch.zeros(batch_size, self.horizon, 4, device=device)
+        
+        A_out[:, 0:1] = A_0
+        b_out[:, 0:1] = b_0
+        contact_out[:, 0:1] = contact_0
+
+        # ------------------------------------------------------------------
+        # 2. 数据准备：Flatten & Filter
+        # ------------------------------------------------------------------
+        num_cons = A_0.shape[-2]
+        
+        # 展平 Batch 和 4条腿 -> (B*4, ...)
+        contain = sample_batch[:, 0, 0:12].reshape(batch_size, 4, 3).reshape(batch_size*4, 3)
+        A_flat = A_0.squeeze(1).reshape(-1, num_cons, 3) 
+        b_flat = b_0.squeeze(1).reshape(-1, num_cons)    
+        contact_flat = contact_0.squeeze(1).reshape(-1)  
+        h_flat = h_0.squeeze(1).reshape(-1, 3)
+        
+        # 找出需要求解的索引 (contact > 0)
+        active_indices = torch.nonzero(contact_flat > 0, as_tuple=True)[0]
+        num_active = len(active_indices)
+
+        if num_active > 0:
+            # 提取有效数据
+            A_act = A_flat[active_indices] # (K, M, 3)
+            b_act = b_flat[active_indices] # (K, M)
+            h_act = h_flat[active_indices] # (K, 3)
+            
+            # ------------------------------------------------------------------
+            # 3. 调用近似方法求解 Chebyshev Center
+            # ------------------------------------------------------------------
+            center_act = get_approx_center_least_squares(A_act, b_act, h_act, factor=0.5)
+            radius_act = compute_chebyshev_radius_batch(A_act, b_act, center_act)
+
+            # 从球中均匀采样
+            samples_act = uniform_sample_in_ball_torch(center=center_act, radius=radius_act)
+
+            
+            contain[active_indices, 0:3] = samples_act
+            sample_batch[:, 0, 0:12] = contain.reshape(batch_size, 12)
+
+        return sample_batch, A_out, b_out, contact_out
+
+
+    def generate_prior_data_qp(self, batch_size, A_0, b_0, contact_0, device="cuda:0"):
         """
         使用 qpth 在 GPU 上批量求解 LP (Chebyshev Center) 并采样。
+         A_0: Tensor (batch, 1, 4, num_cons, 3)
+         b_0: Tensor (batch, 1, 4, num_cons, )
+         contact_0: (batch, 1, 4)
+         h_0: (batch, 1, 4, 3)
         """
         # ------------------------------------------------------------------
         # 1. 初始化容器
@@ -594,24 +985,42 @@ class LeggedRobotDataset(torch.utils.data.Dataset):
 
 if __name__=='__main__':
 
-    dataset = LeggedRobotDataset(
-        file_path='data/bound_go2_traj_data.npz',
-        horizon=100,
-        normalizer='GaussianNormalizer',
-        max_path_length=1000,
-        max_n_episodes=5000,
-        termination_penalty=0,
-        use_padding=False
-    )
+    # dataset = LeggedRobotDataset(
+    #     file_path='data/bound_go2_traj_data.npz',
+    #     horizon=100,
+    #     normalizer='GaussianNormalizer',
+    #     max_path_length=1000,
+    #     max_n_episodes=5000,
+    #     termination_penalty=0,
+    #     use_padding=False
+    # )
 
-    constrained_contact_batch = dataset[0]
-    trajectory = constrained_contact_batch.trajectories
-    condition = constrained_contact_batch.conditions
-    contact = constrained_contact_batch.contact
-    A = constrained_contact_batch.A
-    b = constrained_contact_batch.b
-    print("traj:", trajectory.shape)
-    print("contact:", contact.shape)
-    print("A:", A.shape)
-    print("b:", b.shape)
+    # constrained_contact_batch = dataset[0]
+    # trajectory = constrained_contact_batch.trajectories
+    # condition = constrained_contact_batch.conditions
+    # contact = constrained_contact_batch.contact
+    # A = constrained_contact_batch.A
+    # b = constrained_contact_batch.b
+    # print("traj:", trajectory.shape)
+    # print("contact:", contact.shape)
+    # print("A:", A.shape)
+    # print("b:", b.shape)
+
+    A=np.array([[-0.0666,  0.8082,  0.5851],
+            [-0.0111,  0.1665, -0.9860],
+            [-0.1783,  0.3013, -0.9367],
+            [ 0.2009,  0.3006, -0.9323],
+            [ 0.0225, -0.3064,  0.9516]])
+
+    b=  np.array([ 2.0999, -0.5581, -0.2822, -0.2042,  9.6819])
+
+    A=torch.from_numpy(A).unsqueeze(0).unsqueeze(0)  # (1, 1, num_cons, 3)
+    b=torch.from_numpy(b).unsqueeze(0).unsqueeze(0)  # (1, 1, num_cons)
+
+    vertex = [0.19915308, 1.96614096, 0.89579297]
+    vertex = torch.from_numpy(vertex).unsqueeze(0).unsqueeze(0)  # (1, 1, 3)
+
+    center = get_approx_center_ray_torch(A, b, vertex, factor=0.4)
+
+    print("center:", center)
 

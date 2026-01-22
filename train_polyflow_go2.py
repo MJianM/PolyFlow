@@ -95,6 +95,9 @@ def train_worker(cfg: DictConfig):
     true_traj = policy.normalizer.unnormalize(true_traj_normed, 'observations')
     true_act_traj_normed = true_joint_normed[:, :, :dataset.action_dim]
     true_act_traj = policy.normalizer.unnormalize(true_act_traj_normed, 'actions')
+    true_vertex_normed = batch.vertex # (B, H, 4, 3)
+    true_vertex = policy.normalizer.unnormalize(true_vertex_normed.reshape(-1, 12), 'actions')
+    true_vertex = true_vertex.reshape(-1, cfg.horizon, 4, 3)
     
     true_cond = apply_dict(policy.normalizer.unnormalize, true_cond_normed, 'observations')
     true_A_normed = batch.A
@@ -110,7 +113,7 @@ def train_worker(cfg: DictConfig):
     with torch.no_grad():
         # 用同样的 batch 跑一次，不计入时间
         # 这一步会触发 CuDNN benchmark, Kernel loading, Allocator setup
-        policy(true_cond, A_0=true_A[:, 0:1], b_0=true_b[:, 0:1], contact_0=true_contact[:, 0:1], batch_size=batch_size)
+        policy(true_cond, A_0=true_A[:, 0:1], b_0=true_b[:, 0:1], contact_0=true_contact[:, 0:1], vertex_0=true_vertex[:, 0:1], batch_size=batch_size)
     # === 正式测量 ===
     log.info("Running benchmark pass...")
 
@@ -119,7 +122,7 @@ def train_worker(cfg: DictConfig):
     # trajectories.observations [B, H, O]
     # trajectories.values [B]
     # diffusion_obs [B, diffusion_steps, H, O]
-    action, trajectories, diffusion_obs, _, total_time, avg_per_step_time = policy(true_cond, A_0=true_A[:, 0:1], b_0=true_b[:, 0:1], contact_0=true_contact[:, 0:1], batch_size=batch_size)
+    action, trajectories, diffusion_obs, _, total_time, avg_per_step_time = policy(true_cond, A_0=true_A[:, 0:1], b_0=true_b[:, 0:1], contact_0=true_contact[:, 0:1], vertex_0=true_vertex[:, 0:1], batch_size=batch_size)
     
     # 检验与真实数据的匹配程度
     horizon = cfg.horizon
