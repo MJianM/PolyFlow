@@ -55,22 +55,17 @@ class Policy:
         self.diffusion_model.norm_mins = self.normalizer.normalizers['observations'].mins
         self.diffusion_model.norm_maxs = self.normalizer.normalizers['observations'].maxs
         
-        # --- 计时开始 ---
         if self.device.type == 'cuda':
-            torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+            torch.cuda.synchronize() 
         start_time = time.time()
-        # ----------------
         
         sample, diffusion = self.diffusion_model(conditions, batch_size)
 
-        # --- 计时结束 ---
         if self.device.type == 'cuda':
-            torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+            torch.cuda.synchronize() 
         end_time = time.time()
-        # ----------------
 
 
-        # 计算统计数据
         total_time = end_time - start_time
         avg_time_per_step = total_time / (self.diffusion_model.n_timesteps + self.diffusion_model.sample_end_timestep)
 

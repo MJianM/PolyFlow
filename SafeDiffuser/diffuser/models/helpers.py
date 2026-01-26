@@ -20,12 +20,6 @@ class SinusoidalPosEmb(nn.Module):
         self.dim = dim
 
     def forward(self, x):
-        """
-        输入:
-            x: [batch_size] - 时间步 (timesteps)
-        输出:
-            emb: [batch_size, dim] - 正弦位置编码
-        """
         device = x.device
         half_dim = self.dim // 2
         emb = math.log(10000) / (half_dim - 1)
@@ -67,12 +61,6 @@ class Conv1dBlock(nn.Module):
         )
 
     def forward(self, x):
-        """
-        输入:
-            x: [batch_size, inp_channels, horizon]
-        输出:
-            [batch_size, out_channels, horizon]
-        """
         return self.block(x)
 
 
@@ -81,22 +69,11 @@ class Conv1dBlock(nn.Module):
 #-----------------------------------------------------------------------------#
 
 def extract(a, t, x_shape):
-    """
-    从系数张量 a 中提取对应时间步 t 的值，并重塑为与 x_shape 兼容的形状以便广播。
-    输入:
-        a: [n_timesteps] 或 [n_timesteps, ...] - 预计算的系数
-        t: [batch_size] - 当前时间步
-        x_shape: [batch_size, horizon, transition_dim] - 目标张量形状
-    """
     b, *_ = t.shape
     out = a.gather(-1, t)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 def cosine_beta_schedule(timesteps, s=0.008, dtype=torch.float32):
-    """
-    cosine schedule
-    as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
-    """
     steps = timesteps + 1
     x = np.linspace(0, steps, steps)
     alphas_cumprod = np.cos(((x / steps) + s) / (1 + s) * np.pi * 0.5) ** 2
@@ -106,12 +83,6 @@ def cosine_beta_schedule(timesteps, s=0.008, dtype=torch.float32):
     return torch.tensor(betas_clipped, dtype=dtype)
 
 def apply_conditioning(x, conditions, action_dim):
-    """
-    将条件 (conditions) 强制应用到轨迹 x 上 (Inpainting)。
-    输入:
-        x: [batch_size, horizon, transition_dim]
-        conditions: dict, {timestep: value} - 指定时间步的状态值
-    """
     if conditions is None:
         return x
     for t, val in conditions.items():

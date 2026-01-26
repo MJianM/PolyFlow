@@ -92,7 +92,6 @@ class GaussianDiffusion(nn.Module):
         action_weight=1.0, loss_discount=1.0, loss_weights=None,
     ):
         super().__init__()
-        # 初始化参数
         self.horizon = horizon
         self.observation_dim = observation_dim
         self.action_dim = action_dim
@@ -101,7 +100,6 @@ class GaussianDiffusion(nn.Module):
         self.norm_mins = 0
         self.norm_maxs = 0
 
-        # 计算扩散过程的 beta schedule (余弦调度)
         betas = cosine_beta_schedule(n_timesteps)
         alphas = 1. - betas
         alphas_cumprod = torch.cumprod(alphas, axis=0)
@@ -116,7 +114,6 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
 
         # calculations for diffusion q(x_t | x_{t-1}) and others
-        # 预计算扩散过程所需的系数
         self.register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
         self.register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
         self.register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
@@ -124,7 +121,6 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
-        # 计算后验分布 q(x_{t-1} | x_t, x_0) 的方差
         posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
         self.register_buffer('posterior_variance', posterior_variance)
 
@@ -138,7 +134,6 @@ class GaussianDiffusion(nn.Module):
             (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))
 
         ## get loss coefficients and initialize objective
-        # 获取损失函数权重 loss_weights: (horizon, transition_dim)
         loss_weights = self.get_loss_weights(action_weight, loss_discount, loss_weights)
         self.loss_fn = Losses[loss_type](loss_weights, self.action_dim)
 
@@ -189,13 +184,11 @@ class GaussianDiffusion(nn.Module):
 
     def predict_start_from_noise(self, x_t, t, noise):
         '''
-            从 x_t 和模型预测的噪声中恢复 x_0 (原始轨迹)。
-            
-            输入:
+            input:
                 x_t: [batch_size, horizon, transition_dim]
                 t: [batch_size]
-                noise: [batch_size, horizon, transition_dim] (模型输出)
-            输出:
+                noise: [batch_size, horizon, transition_dim]
+            output:
                 x_0: [batch_size, horizon, transition_dim]
         '''
         if self.predict_epsilon:
@@ -208,9 +201,8 @@ class GaussianDiffusion(nn.Module):
 
     def q_posterior(self, x_start, x_t, t):
         """
-        计算后验分布 q(x_{t-1} | x_t, x_0) 的均值和方差。
-        输入:
-            x_start: [batch_size, horizon, transition_dim] (预测的或真实的 x_0)
+        input:
+            x_start: [batch_size, horizon, transition_dim] 
             x_t: [batch_size, horizon, transition_dim]
             t: [batch_size]
         """
@@ -225,12 +217,11 @@ class GaussianDiffusion(nn.Module):
 
     def p_mean_variance(self, x, cond, t):
         """
-        计算模型预测的逆向分布 p_theta(x_{t-1} | x_t) 的均值和方差。
-        输入:
+        input:
             x: [batch_size, horizon, transition_dim]
-            cond: dict (条件)
+            cond: dict 
             t: [batch_size]
-        输出:
+        output:
             model_mean, posterior_variance, posterior_log_variance
         """
 
@@ -248,13 +239,11 @@ class GaussianDiffusion(nn.Module):
 
 
     @torch.no_grad()   #only for sampling
-    # Shielding 方法 (截断法)，直接将违反约束的状态投影回安全区域
     def Shield(self, x0, xp10):  #Truncate method
         """
-        Shielding (截断) 方法：如果预测的下一步状态 xp10 违反了安全约束，则将其强制投影回安全区域边界。
-        输入:
-            x0: [1, horizon, transition_dim] (当前状态)
-            xp10: [1, horizon, transition_dim] (预测的下一步状态)
+        input:
+            x0: [1, horizon, transition_dim] 
+            xp10: [1, horizon, transition_dim] 
         """
 
         x = x0.clone()
@@ -296,11 +285,9 @@ class GaussianDiffusion(nn.Module):
         return xp1
     
     @torch.no_grad()   #only for sampling
-    # 梯度引导法 (Classifier Guidance / Potential-based)，通过对安全函数求导来修正轨迹
     def GD(self, x0, xp10):    #classifier guidance or potential-based method
         """
-        梯度引导法：计算安全函数(Barrier Function)关于状态的梯度，并沿梯度方向调整状态以避开障碍物。
-        输入:
+        input:
             x0: [1, horizon, transition_dim]
             xp10: [1, horizon, transition_dim]
         """
@@ -355,8 +342,7 @@ class GaussianDiffusion(nn.Module):
     # @torch.no_grad()   #only for sampling
     # def invariance_umaze(self, x, xp1):   #  RoS-diffuser for umaze
     #     """
-    #     RoS (Robust Safety) for Umaze: 使用 QP 求解器修正轨迹以满足 CBF 约束。
-    #     输入:
+    #     input:
     #         x: [1, horizon, transition_dim]
     #         xp1: [1, horizon, transition_dim]
     #     """
@@ -497,19 +483,15 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()   #only for sampling
     def invariance(self, x, xp1):    #  RoS-diffuser for maze2d-large-v1
         """
-        RoS (Robust Safety) 方法：针对 maze2d-large-v1 任务。
-        使用 CBF (Control Barrier Function) 构建 QP 问题，最小化修正量 ||u - u_ref||^2，同时满足安全性约束。
-        输入:
+        input:
             x: [1, horizon, transition_dim]
             xp1: [1, horizon, transition_dim]
         """
 
-        # x: 当前状态 [batch_size=1, horizon, transition_dim]
-        # xp1: 预测的下一时刻状态 (mean)
         x = x.squeeze(0)
         xp1 = xp1.squeeze(0)
 
-        nBatch = x.shape[0] # 这里 nBatch 实际上是 Horizon (时间步数)，因为我们对整条轨迹的每个点都做修正
+        nBatch = x.shape[0] 
         ref = xp1 - x
 
         #normalize obstacle 1, x-1, y-0  x = 1/12*np.cos(theta) + 5.5/12, y = 1/9*np.sin(theta) + 5/9
@@ -519,18 +501,15 @@ class GaussianDiffusion(nn.Module):
         off_y = 2*(5-0.5 - self.norm_mins[0])/(self.norm_maxs[0] - self.norm_mins[0]) - 1
 
         #CBF
-        # 障碍物1的 CBF 函数 h(x) >= 0，这里 b 对应 h(x)
-        # 这是一个椭圆方程: ((x-x0)/a)^2 + ((y-y0)/b)^2 - 1 >= 0 (安全)
         b = ((x[:,2:3] - off_y)/yr)**2 + ((x[:,3:4] - off_x)/xr)**2 - 1 - 0.01  # robust term 09/25
         Lfb = 0
-        # 计算 Lie Derivative Lgbu (梯度)
+
         Lgbu1 = 2*((x[:,2:3] - off_y)/yr)/yr
         Lgbu2 = 2*((x[:,3:4] - off_x)/xr)/xr
 
-        # 构建 QP 约束矩阵 G u <= h
         G = torch.cat([-Lgbu1, -Lgbu2], dim = 1)
         G = G.unsqueeze(1)
-        k = 1 # CBF 参数 alpha
+        k = 1 
         h = Lfb + k*b
 
         self.safe1 = torch.min(b[:,0] + 0.01)  # robust term 09/25
@@ -542,7 +521,6 @@ class GaussianDiffusion(nn.Module):
         off_y = 2*(2-0.5 - self.norm_mins[0])/(self.norm_maxs[0] - self.norm_mins[0]) - 1
 
         #CBF
-        # 障碍物2是一个超椭圆 (Super-ellipsoid)，指数为 4
         b = ((x[:,2:3] - off_y)/yr)**4 + ((x[:,3:4] - off_x)/xr)**4 - 1 - 0.01 # robust term 09/25
         Lfb = 0
         Lgbu1 = 4*((x[:,2:3] - off_y)/yr)**3/yr
@@ -558,17 +536,13 @@ class GaussianDiffusion(nn.Module):
         G = torch.cat([G, G1], dim = 1)
         h = torch.cat([h, h1], dim = 1)
         
-        # QP 目标函数: min ||u - u_ref||^2 -> min u^T Q u + q^T u
-        # 这里 u 是对状态的修正量
         q = -ref[:,2:4].to(G.device)
         Q = Variable(torch.eye(2))
         Q = Q.unsqueeze(0).expand(nBatch, 2, 2).to(G.device)
         
         e = Variable(torch.Tensor())
-        # 求解 QP 问题
         out = QPFunction(verbose=-1, solver = QPSolvers.PDIPM_BATCHED)(Q, q, G, h, e, e)
 
-        # 将修正量应用到预测状态上
         rt = xp1.clone()      
         rt[:,2:4] = x[:,2:4] + out
         # print(out)
@@ -578,8 +552,7 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()   #only for sampling
     def invariance_cf(self, x, xp1):  # closed form solution,  RoS-diffuser for maze2d-large-v1
         """
-        RoS 的闭式解版本 (Closed Form)：针对两个障碍物的情况，手动推导 KKT 条件下的解析解，避免调用 QP 求解器，提高速度。
-        输入:
+        input:
             x: [1, horizon, transition_dim]
             xp1: [1, horizon, transition_dim]
         """
@@ -615,7 +588,6 @@ class GaussianDiffusion(nn.Module):
         off_y = 2*(2-0.5 - self.norm_mins[0])/(self.norm_maxs[0] - self.norm_mins[0]) - 1
 
         #CBF
-        # 障碍物2是一个超椭圆 (Super-ellipsoid)，指数为 4
         b = ((x[:,2:3] - off_y)/yr)**4 + ((x[:,3:4] - off_x)/xr)**4 - 1 - 0.01 # robust term 09/25
         Lfb = 0
         Lgbu1 = 4*((x[:,2:3] - off_y)/yr)**3/yr
@@ -657,15 +629,10 @@ class GaussianDiffusion(nn.Module):
 
     @torch.no_grad()   #only for sampling
     def invariance_relax(self, x, xp1, t):  #  ReS-diffuser for maze2d-large-v1
-        # RoS (Robust Safety) 方法，使用 CBF (Control Barrier Function) 和 QP (Quadratic Programming) 求解器
-        # 针对 maze2d-large-v1 任务
-
-        # x: 当前状态 [batch_size=1, horizon, transition_dim]
-        # xp1: 预测的下一时刻状态 (mean)
         x = x.squeeze(0)
         xp1 = xp1.squeeze(0)
 
-        nBatch = x.shape[0] # 这里 nBatch 实际上是 Horizon (时间步数)，因为我们对整条轨迹的每个点都做修正
+        nBatch = x.shape[0] 
         ref = xp1 - x
 
         #normalize obstacle 1, x-1, y-0  x = 1/12*np.cos(theta) + 5.5/12, y = 1/9*np.sin(theta) + 5/9
@@ -1105,22 +1072,19 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()
     def p_sample(self, x, cond, t):
         """
-        单步逆向采样：从 x_t 采样 x_{t-1}。
-        输入:
+        input:
             x: [batch_size, horizon, transition_dim]
             cond: dict
             t: [batch_size]
-        输出:
-            x: [batch_size, horizon, transition_dim] (经过安全修正后的 x_{t-1})
+        output:
+            x: [batch_size, horizon, transition_dim] 
         """
         b, *_, device = *x.shape, x.device
-        # 1. 预测均值和方差
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, cond=cond, t=t)
         noise = torch.randn_like(x)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
-        # 2. 计算无约束的下一步状态 xp1 (mean + noise)
         xp1 = model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
         # Note:  choose any one of the below
@@ -1145,7 +1109,6 @@ class GaussianDiffusion(nn.Module):
         # x = self.GD(x, xp1)
 
         ####################### SafeDiffusers 
-        # 3. 应用安全修正 (Invariance / CBF)
         x = xp1 # for training only
         # x = self.invariance(x, xp1)    # RoS
         # x = self.invariance_cf(x, xp1)  # RoS closed form
@@ -1186,33 +1149,27 @@ class GaussianDiffusion(nn.Module):
     @torch.no_grad()
     def p_sample_loop(self, shape, cond, verbose=True, return_diffusion=False):
         """
-        完整的采样循环：从 x_T (噪声) 逐步去噪到 x_0。
-        输入:
+        input:
             shape: (batch_size, horizon, transition_dim)
             cond: dict
-        输出:
-            x: [batch_size, horizon, transition_dim] (生成的轨迹)
+        output:
+            x: [batch_size, horizon, transition_dim]
         """
         device = self.betas.device
 
         batch_size = shape[0]
-        # 从标准正态分布采样 x_T
         x = torch.randn(shape, device=device)
-        # 应用条件 (Inpainting)
         x = apply_conditioning(x, cond, self.action_dim)
 
         if return_diffusion: diffusion = [x]
 
         progress = utils.Progress(self.n_timesteps) if verbose else utils.Silent()
         safe1, safe2 = [], []
-        # 逆向扩散过程
         for i in reversed(range(0, self.n_timesteps)):  #-50 change here for the number of diffusion steps,
             if i < 0:
                 i = 0
             timesteps = torch.full((batch_size,), i, device=device, dtype=torch.long)
-            # 执行单步采样
             x = self.p_sample(x, cond, timesteps)
-            # 再次强制应用条件
             x = apply_conditioning(x, cond, self.action_dim)
             safe1.append(self.safe1.unsqueeze(0))
             safe2.append(self.safe2.unsqueeze(0))
@@ -1234,7 +1191,6 @@ class GaussianDiffusion(nn.Module):
     def conditional_sample(self, cond, n_samples, horizon=None, return_diffusion = True, **kwargs):
         '''
             conditions : [ (time, state), ... ]
-            条件采样入口函数
         '''
         device = self.betas.device
         batch_size = n_samples
@@ -1247,8 +1203,8 @@ class GaussianDiffusion(nn.Module):
 
     def q_sample(self, x_start, t, noise=None):
         """
-        前向扩散过程：q(x_t | x_0)。
-        输入:
+        forward diffusion process: (x_t | x_0)。
+        input:
             x_start: [batch_size, horizon, transition_dim]
             t: [batch_size]
             noise: [batch_size, horizon, transition_dim]
@@ -1265,25 +1221,21 @@ class GaussianDiffusion(nn.Module):
 
     def p_losses(self, x_start, cond, t):
         """
-        计算训练损失。
-        输入:
+        input:
             x_start: [batch_size, horizon, transition_dim]
             cond: dict
             t: [batch_size]
         """
         noise = torch.randn_like(x_start)
 
-        # 1. 加噪得到 x_t
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         x_noisy = apply_conditioning(x_noisy, cond, self.action_dim)
 
-        # 2. 模型预测 x_recon (通常是预测噪声 epsilon)
         x_recon = self.model(x_noisy, cond, t)
         x_recon = apply_conditioning(x_recon, cond, self.action_dim)
 
         assert noise.shape == x_recon.shape
 
-        # 3. 计算损失 (预测噪声与真实噪声的差异)
         if self.predict_epsilon:
             loss, info = self.loss_fn(x_recon, noise)
         else:
@@ -1346,10 +1298,6 @@ class GaussianDiffusion(nn.Module):
 
 
 class SafeGaussianDiffusion(GaussianDiffusion):
-    """
-    安全扩散模型类，继承自 GaussianDiffusion。
-    添加了安全修正机制 (Invariance / CBF)。
-    """
     def __init__(self, 
                  model_bone, 
                  horizon, 
@@ -1380,11 +1328,10 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         assert sample_end_timestep <= 0
         assert sample_cbf_timestep is None or sample_cbf_timestep > 0
 
-        # 保存未经过归一化的障碍物列表 [(xc, yc, a, b, n)]
         self.ellips_list = ellips_list
         self.safe_method = safe_method
 
-        self.cbfs = [0 for _ in range(len(ellips_list))]  # 用于记录每个障碍物的h值
+        self.cbfs = [0 for _ in range(len(ellips_list))] 
 
         self.sample_end_timestep = sample_end_timestep
         self.sample_cbf_timestep = sample_cbf_timestep
@@ -1393,17 +1340,14 @@ class SafeGaussianDiffusion(GaussianDiffusion):
 
     def get_normalize_obstacles(self, ellips_list):
         """
-        归一化障碍物列表
         ellips_list: [(xc, yc, a, b, n), ...]
         xc -> norm_mins[0], yc -> norm_mins[1]
         """
         obstacles = []
         for (xc, yc, a, b, n) in ellips_list:
-            # 使用索引 0 归一化 x，索引 1 归一化 y
             xc_norm = 2 * (xc - self.norm_mins[0]) / (self.norm_maxs[0] - self.norm_mins[0]) - 1
             yc_norm = 2 * (yc - self.norm_mins[1]) / (self.norm_maxs[1] - self.norm_mins[1]) - 1
             
-            # 半轴长缩放也对应各自轴的范围
             a_norm = 2 * a / (self.norm_maxs[0] - self.norm_mins[0])
             b_norm = 2 * b / (self.norm_maxs[1] - self.norm_mins[1])
             
@@ -1418,10 +1362,9 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     @torch.no_grad()
     def Shield(self, x0, xp10):
         """
-        Shielding (截断) 方法：如果预测的下一步状态 xp10 违反了安全约束，则将其强制投影回安全区域边界。
-        输入:
-            x0: [batch, horizon, transition_dim] (当前状态)
-            xp10: [batch, horizon, transition_dim] (预测的下一步状态)
+        input:
+            x0: [batch, horizon, transition_dim] 
+            xp10: [batch, horizon, transition_dim] 
         """
         xp1 = xp10.clone()
         xp1 = xp1.reshape(-1, xp1.shape[-1])  # [batch*horizon, transition_dim]
@@ -1440,7 +1383,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             self.cbfs[i] = torch.min(dist_val - 1.0)
 
             if inside.any():
-                # 计算边界投影比例
                 scale = (1.0 / dist_val[inside])**(1.0 / obs['n'])
                 xp1[inside, idx_x] = obs['xc'] + dx[inside] * obs['a'] * scale
                 xp1[inside, idx_y] = obs['yc'] + dy[inside] * obs['b'] * scale
@@ -1452,8 +1394,7 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     def GD(self, x0, xp10):
         """
         Classifier Guidance / Potential-based
-        梯度引导法：计算安全函数关于状态的梯度，并沿梯度方向调整状态以避开障碍物。
-        输入:
+        input:
             x0: [1, horizon, transition_dim]
             xp10: [1, horizon, transition_dim]
         """
@@ -1471,9 +1412,8 @@ class SafeGaussianDiffusion(GaussianDiffusion):
 
             self.cbfs[i] = torch.min(b)
             
-            mask = b < 0.1 # 缓冲区
+            mask = b < 0.1 
             if mask.any():
-                # 计算各轴梯度
                 grad_x = obs['n'] * torch.abs(dx_n[mask])**(obs['n']-1) * torch.sign(dx_n[mask]) / obs['a']
                 grad_y = obs['n'] * torch.abs(dy_n[mask])**(obs['n']-1) * torch.sign(dy_n[mask]) / obs['b']
                 
@@ -1486,12 +1426,10 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     @torch.no_grad()
     def invariance(self, x, xp1, k=1.0):
         """
-        RoS (Robust Safety) 方法：针对 maze2d-large-v1 任务。
-        使用 CBF 构建 QP 问题，最小化修正量 ||u - u_ref||^2，同时满足安全性约束。
-        输入:
+        input:
             x: [1, horizon, transition_dim]
             xp1: [1, horizon, transition_dim]
-            k: CBF 增益
+            k: CBF gain
         """
         x_curr = x.reshape(-1, x.shape[-1])  # [batch*horizon, transition_dim]
         x_pred = xp1.reshape(-1, xp1.shape[-1])  # [batch*horizon, transition_dim]
@@ -1500,7 +1438,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         idx_x = self.action_dim + 0
         idx_y = self.action_dim + 1
         
-        # 目标函数中的 u_ref：模型建议的位移量
         u_ref_x = x_pred[:, idx_x] - x_curr[:, idx_x]
         u_ref_y = x_pred[:, idx_y] - x_curr[:, idx_y]
         
@@ -1513,13 +1450,11 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             dx_n = (x_curr[:, idx_x] - obs['xc']) / obs['a']
             dy_n = (x_curr[:, idx_y] - obs['yc']) / obs['b']
             
-            # 安全函数 b = h(x) >= 0
             b = torch.abs(dx_n)**obs['n'] + torch.abs(dy_n)**obs['n'] - 1 - 0.01
             
             self.cbfs[i] = torch.min(b)
 
-            # 计算梯度矩阵 G
-            # 约束形式：-grad_x * ux - grad_y * uy <= k * b
+            # -grad_x * ux - grad_y * uy <= k * b
             grad_x = obs['n'] * torch.abs(dx_n)**(obs['n']-1) * torch.sign(dx_n) / obs['a']
             grad_y = obs['n'] * torch.abs(dy_n)**(obs['n']-1) * torch.sign(dy_n) / obs['b']
             
@@ -1532,8 +1467,8 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         G = torch.cat(all_G, dim=1) # [H, num_obs, 2]
         h = torch.cat(all_h, dim=1) # [H, num_obs]
         
-        # 展开目标函数：1/2 ||u - u_ref||^2 = 1/2 (u^T I u - 2 u^T u_ref + const)
-        # 对应标准型：1/2 u^T Q u + q^T u
+        # objective function: 1/2 ||u - u_ref||^2 = 1/2 (u^T I u - 2 u^T u_ref + const)
+        # 1/2 u^T Q u + q^T u
         Q = torch.eye(2).unsqueeze(0).expand(n_steps, 2, 2).to(x.device) + \
             torch.eye(2, device=x.device).unsqueeze(0) * 1e-6
         q = -torch.stack([u_ref_x, u_ref_y], dim=1).to(x.device)
@@ -1550,11 +1485,9 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             e = e.double()
             u_optimal = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(Q, q, G, h, e, e)
         
-            # 检查是否包含 NaN
             if torch.isnan(u_optimal).any():
                 raise ValueError("QP Solver returned NaN")
         except:
-            # 【策略二：回退】如果 QP 彻底失败，使用 Shielding (投影法)
             print(f"QP failed, falling back to Shielding. Error: {e}")
             return self.Shield(x, xp1)
 
@@ -1568,11 +1501,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
 
     @torch.no_grad()
     def invariance_cf_multi(self, x, xp1):
-        """
-        针对多障碍物的闭式解版本 (Closed Form)：
-        原理：在每个时间步识别最危险的障碍物，并应用单障碍物 KKT 解析解。
-        优点：无需调用 QP 求解器，计算速度极快，适合扩散模型的高频采样。
-        """
         x_curr = x.reshape(-1, x.shape[-1])  # [H, transition_dim]
         x_pred = xp1.reshape(-1, xp1.shape[-1])  # [H, transition_dim]
         n_steps = x_curr.shape[0]
@@ -1580,11 +1508,9 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         idx_x = self.action_dim + 0
         idx_y = self.action_dim + 1
         
-        # 扩散模型原始建议的位移增量 u_ref (即代码中的 u_bar)
         u_bar_x = x_pred[:, idx_x] - x_curr[:, idx_x]
         u_bar_y = x_pred[:, idx_y] - x_curr[:, idx_y]
         
-        # 存储所有障碍物的安全值 b (h(x)) 和对应的梯度 G, h
         all_b = []
         all_G = []
         all_h = []
@@ -1592,60 +1518,44 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         obstacles = self.get_normalize_obstacles(self.ellips_list)
 
         for i, obs in enumerate(obstacles):
-            # 1. 计算归一化坐标偏移
             dx_n = (x_curr[:, idx_x] - obs['xc']) / obs['a']
             dy_n = (x_curr[:, idx_y] - obs['yc']) / obs['b']
             
-            # 2. 计算安全函数 b (即 h(x))
-            # b > 0 表示安全，b < 0 表示进入障碍物
             b = torch.abs(dx_n)**obs['n'] + torch.abs(dy_n)**obs['n'] - 1 - 0.01
             all_b.append(b) # [H]
 
             self.cbfs[i] = torch.min(b)
             
-            # 3. 计算梯度 (Lie Derivative)
             Lgbu_x = obs['n'] * torch.abs(dx_n)**(obs['n']-1) * torch.sign(dx_n) / obs['a']
             Lgbu_y = obs['n'] * torch.abs(dy_n)**(obs['n']-1) * torch.sign(dy_n) / obs['b']
             
-            # 约束形式: G * u <= h (其中 u 是修正量)
-            # 这里 G = [-Lgbu_x, -Lgbu_y], h = k * b (k=1)
+            # G * u <= h 
+            # G = [-Lgbu_x, -Lgbu_y], h = k * b (k=1)
             G_i = torch.stack([-Lgbu_x, -Lgbu_y], dim=1) # [H, 2]
             h_i = 1.0 * b # [H]
             
             all_G.append(G_i)
             all_h.append(h_i)
 
-        # 4. 找到每个时间步最危险的障碍物索引 (min h(x))
         all_b_tensor = torch.stack(all_b, dim=1) # [H, Num_Obs]
         min_b_val, min_idx = torch.min(all_b_tensor, dim=1) # [H]
         
-        # 5. 提取最危险障碍物的参数
-        # 使用 advanced indexing 提取每个时间步对应的 G 和 h
         G_final = torch.stack(all_G, dim=1) # [H, Num_Obs, 2]
         h_final = torch.stack(all_h, dim=1) # [H, Num_Obs]
         
-        # 选出最危险的 G 和 h
         G_star = G_final[torch.arange(n_steps), min_idx] # [H, 2]
         h_star = h_final[torch.arange(n_steps), min_idx] # [H]
         
-        # 6. 单约束解析解计算 (KKT)
-        # 目标: min ||out - u_bar||^2 s.t. G_star * out <= h_star
-        # p_bar 衡量预测位置是否违反约束：p_bar = h - G * u_bar
-        # 如果 p_bar >= 0，说明原始预测 xp1 安全，out = u_bar
-        # 如果 p_bar < 0，说明 xp1 碰撞，需要沿 G 方向修正
+        # goal: min ||out - u_bar||^2 s.t. G_star * out <= h_star
         u_bar = torch.stack([u_bar_x, u_bar_y], dim=1) # [H, 2]
         p_bar = h_star - torch.sum(G_star * u_bar, dim=1) # [H]
         
-        # 计算 Lagrange 乘子 lambda = clamp(p_bar / ||G||^2, max=0)
-        # 注意：根据 KKT，修正量 out = u_bar + lambda * G^T
+        # lambda = clamp(p_bar / ||G||^2, max=0)
         norm_sq = torch.sum(G_star * G_star, dim=1) + 1e-8
-        # 只有当 p_bar < 0 时，lambda 才有值
         lambda_val = torch.clamp(p_bar, max=0) / norm_sq # [H]
         
-        # 计算最终修正后的增量 out
         out = u_bar + lambda_val.unsqueeze(1) * G_star # [H, 2]
 
-        # 7. 应用修正并返回
         rt = x_pred.clone()
         rt[:, idx_x] = x_curr[:, idx_x] + out[:, 0]
         rt[:, idx_y] = x_curr[:, idx_y] + out[:, 1]
@@ -1656,8 +1566,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     @torch.no_grad()
     def invariance_relax(self, x, xp1, t):
         """
-        多障碍物 ReS-diffuser (Relaxed Safety)：
-        通过引入松弛变量矩阵，确保在多约束冲突或高噪声下 QP 问题的可行性。
         :params x: [batch, horizon, transition_dim]
         :params xp1: [batch, horizon, transition_dim]
         :params t: [batch,]
@@ -1666,21 +1574,15 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         x_pred = xp1.reshape(-1, xp1.shape[-1])  # [H, transition_dim]
         t = t.unsqueeze(1).repeat(1, x.shape[1]).reshape(-1)  # [H,]
         n_steps = x_curr.shape[0]  # Horizon
-        n_obs = len(self.ellips_list) # 障碍物数量
+        n_obs = len(self.ellips_list) 
         
-        # 状态索引映射
         idx_x = self.action_dim + 0
         idx_y = self.action_dim + 1
         
-        # 原始建议位移
         ref = x_pred - x_curr
         
-        # 确定松弛权重 (遵循原代码逻辑)
-        # 当 t 较大时开启松弛 (sign > 0)，允许变量 xi 调节约束
         sign = torch.where(t >= 0, torch.full_like(t, 1.0), torch.full_like(t, 0.0)) 
 
-        # 初始化大矩阵
-        # 变量总数 = 2 (ux, uy) + n_obs (每个障碍物一个松弛变量)
         n_vars = 2 + n_obs
         all_G = []
         all_h = []
@@ -1688,14 +1590,11 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         obstacles = self.get_normalize_obstacles(self.ellips_list)
 
         for i, obs in enumerate(obstacles):
-            # 1. 计算当前位置的几何参数
             dx_n = (x_curr[:, idx_x] - obs['xc']) / obs['a']
             dy_n = (x_curr[:, idx_y] - obs['yc']) / obs['b']
             
-            # 2. 安全函数 h(x)
             b = torch.abs(dx_n)**obs['n'] + torch.abs(dy_n)**obs['n'] - 1 - 0.01
 
-            # 3. 计算梯度 (Lie Derivative)
             Lgbu_x = obs['n'] * torch.abs(dx_n)**(obs['n']-1) * torch.sign(dx_n) / obs['a']
             Lgbu_y = obs['n'] * torch.abs(dy_n)**(obs['n']-1) * torch.sign(dy_n) / obs['b']
             grad = torch.concatenate([Lgbu_x.unsqueeze(1), Lgbu_y.unsqueeze(1)], dim=1)
@@ -1708,9 +1607,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
 
             self.cbfs[i] = torch.min(b)
 
-
-            # 4. 构造该障碍物的约束行：[-Lgbu_x, -Lgbu_y, 0, ..., sign, ..., 0]
-            # 只有对应当前障碍物索引 i 的松弛列填入 sign
             G_row = torch.zeros(n_steps, n_vars).to(x.device)
             G_row[:, 0] = -Lgbu_x
             # G_row[:, 0] = -grad[:, 0]
@@ -1721,21 +1617,19 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             all_G.append(G_row.unsqueeze(1))
             all_h.append(k * b.unsqueeze(1))
 
-        # 拼接所有障碍物的约束矩阵 [H, n_obs, 2 + n_obs]
+        # [H, n_obs, 2 + n_obs]
         G = torch.cat(all_G, dim=1)
         h = torch.cat(all_h, dim=1) # [H, n_obs]
-        
-        # 5. 构建 QP 目标函数
-        # 目标：min 1/2 * (ux^2 + uy^2 + xi_1^2 + ... + xi_n^2) + q^T * z
+
+        # goal：min 1/2 * (ux^2 + uy^2 + xi_1^2 + ... + xi_n^2) + q^T * z
         Q = torch.eye(n_vars).unsqueeze(0).expand(n_steps, n_vars, n_vars).to(x.device) + \
             1e-4 * torch.eye(n_vars, device=x.device).unsqueeze(0)
         
-        # q 向量：[-u_ref_x, -u_ref_y, 0, ..., 0]
+        # [-u_ref_x, -u_ref_y, 0, ..., 0]
         q_vec = torch.zeros(n_steps, n_vars).to(x.device)
         q_vec[:, 0] = -ref[:, idx_x]
         q_vec[:, 1] = -ref[:, idx_y]
         
-        # 6. 求解 QP 问题
         dtype_orig = x.dtype
         Q = Q.double()
         q_vec = q_vec.double()
@@ -1744,7 +1638,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         e = Variable(torch.Tensor().double().to(x.device))
         out = QPFunction(verbose=True, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(Q, q_vec, G, h, e, e)
 
-        # 7. 提取位移修正量并应用 (前两维)
         rt = x_pred.clone()      
         rt[:, idx_x] = x_curr[:, idx_x] + out[:, 0].to(dtype=dtype_orig)
         rt[:, idx_y] = x_curr[:, idx_y] + out[:, 1].to(dtype=dtype_orig)
@@ -1755,16 +1648,13 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     @torch.no_grad()
     def invariance_time(self, x, xp1, t):
         """
-        针对多障碍物的 TVS-diffuser (Time-Varying Safety)：
-        原理：利用 Sigmoid 函数随扩散步数 t 动态调整安全边界的严格程度。
         :params x: [batch, horizon, transition_dim]
         :params xp1: [batch, horizon, transition_dim]
         :params t: [batch,]
         """
         t_bias = 5
-        B, H, D = x.shape  # 获取 Batch Size, Horizon 和维度
+        B, H, D = x.shape  
         
-        # 将 batch 和 horizon 展平，合并为 QP 求解器的并行维度
         x_curr = x.view(B * H, D)
         x_pred = xp1.view(B * H, D)
         n_total = B * H 
@@ -1772,19 +1662,14 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         idx_x = self.action_dim + 0
         idx_y = self.action_dim + 1
         
-        # 处理时间项：将 t [B] 扩展并展平为 [B*H]
         t_expand = t.view(B, 1).expand(B, H).reshape(-1)
 
-        # 当 t = T 时，gamma 给一个负值，当 t = 0 时，gamma = 0
-
-        T_temp = 10.0 # 增大这个值会让变换过程变得更平缓
+        T_temp = 10.0 
         t_bias = 5.0
         
-        # 这种写法能保证在 t 较大时也有一定的梯度，而不是完全死寂
         sig_input = (t_expand - t_bias) / T_temp 
         sig_val = torch.sigmoid(sig_input)
         
-        # Gamma 定义
         gamma_scale = 5.0
         gamma = - gamma_scale * sig_val
         Lfb = (gamma_scale / T_temp) * sig_val * (1 - sig_val)
@@ -1794,27 +1679,24 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         
         obstacles = self.get_normalize_obstacles(self.ellips_list)
 
-        # 遍历所有障碍物构建约束
         for i, obs in enumerate(obstacles):
             dx_n = (x_curr[:, idx_x] - obs['xc']) / obs['a']
             dy_n = (x_curr[:, idx_y] - obs['yc']) / obs['b']
             
-            # [修正 2] 梯度安全保护 (防止中心点梯度为0导致矩阵奇异)
             eps = 1e-6
             dx_n_safe = torch.where(torch.abs(dx_n) < eps, torch.sign(dx_n + 1e-9)*eps, dx_n)
             dy_n_safe = torch.where(torch.abs(dy_n) < eps, torch.sign(dy_n + 1e-9)*eps, dy_n)
 
-            # 时变安全函数 b(x, t) = h_geom(x) - sigma(t_bias - t) - 0.01
+            # b(x, t) = h_geom(x) - sigma(t_bias - t) - 0.01
             h_geom = torch.abs(dx_n)**obs['n'] + torch.abs(dy_n)**obs['n'] - 1
             b = h_geom - gamma - 0.01
 
             self.cbfs[i] = torch.min(b)
             
-            # 空间梯度项
             Lgbu_x = obs['n'] * torch.abs(dx_n)**(obs['n']-1) * torch.sign(dx_n_safe) / obs['a']
             Lgbu_y = obs['n'] * torch.abs(dy_n)**(obs['n']-1) * torch.sign(dy_n_safe) / obs['b']
             
-            # 构建约束矩阵 G_i [n_total, 1, 2] 和 h_i [n_total, 1]
+            # G_i [n_total, 1, 2] 和 h_i [n_total, 1]
             G_i = torch.stack([-Lgbu_x, -Lgbu_y], dim=1).unsqueeze(1)
             k = 1.0
             h_i = ( - Lfb + k * b).unsqueeze(1)
@@ -1825,7 +1707,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         G = torch.cat(all_G, dim=1) # [B*H, num_obs, 2]
         h = torch.cat(all_h, dim=1) # [B*H, num_obs]
         
-        # 构建 QP 目标函数项
         ref_x = x_pred[:, idx_x] - x_curr[:, idx_x]
         ref_y = x_pred[:, idx_y] - x_curr[:, idx_y]
         q = -torch.stack([ref_x, ref_y], dim=1).to(G.device)
@@ -1833,7 +1714,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
             torch.eye(2, device=G.device).unsqueeze(0) * 1e-4
         
         e = Variable(torch.Tensor())
-        # 批量求解 QP：qpth 会并行处理 B*H 个二次规划问题
         dtype_ori = x.dtype
         Q = Q.double()
         q = q.double()
@@ -1842,7 +1722,6 @@ class SafeGaussianDiffusion(GaussianDiffusion):
         e = e.double()
         out = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(Q, q, G, h, e, e)
         
-        # 将修正后的结果重新 View 回原始形状
         rt = xp1.clone().view(B * H, D)
         rt[:, idx_x] = x_curr[:, idx_x] + out[:, 0].to(dtype=dtype_ori)
         rt[:, idx_y] = x_curr[:, idx_y] + out[:, 1].to(dtype=dtype_ori)
@@ -1853,22 +1732,19 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     @torch.no_grad()
     def p_sample(self, x, cond, t):
         """
-        单步逆向采样：从 x_t 采样 x_{t-1}。
-        输入:
+        input:
             x: [batch_size, horizon, transition_dim]
             cond: dict
             t: [batch_size]
-        输出:
+        output:
             x: [batch_size, horizon, transition_dim] (经过安全修正后的 x_{t-1})
         """
         b, *_, device = *x.shape, x.device
-        # 1. 预测均值和方差
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, cond=cond, t=t)
         noise = torch.randn_like(x)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
-        # 2. 计算无约束的下一步状态 xp1 (mean + noise)
         xp1 = model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
         if self.safe_method == 'diffuser':
@@ -1960,34 +1836,28 @@ class SafeGaussianDiffusion(GaussianDiffusion):
     @torch.no_grad()
     def p_sample_loop(self, shape, cond, verbose=True, return_diffusion=False):
         """
-        完整的采样循环：从 x_T (噪声) 逐步去噪到 x_0。
-        输入:
+        input:
             shape: (batch_size, horizon, transition_dim)
             cond: dict
-        输出:
-            x: [batch_size, horizon, transition_dim] (生成的轨迹)
+        output:
+            x: [batch_size, horizon, transition_dim] 
         """
         print(f"Sampling using method {self.safe_method}....")
 
         device = self.betas.device
 
         batch_size = shape[0]
-        # 从标准正态分布采样 x_T
         x = torch.randn(shape, device=device)
-        # 应用条件 (Inpainting)
         x = apply_conditioning(x, cond, self.action_dim)
 
         if return_diffusion: diffusion = [x]
 
         progress = utils.Progress(self.n_timesteps) if verbose else utils.Silent()
-        # 逆向扩散过程
         for i in reversed(range(self.sample_end_timestep, self.n_timesteps)):  #-50 change here for the number of diffusion steps,
             if i < 0:
                 i = 0
             timesteps = torch.full((batch_size,), i, device=device, dtype=torch.long)
-            # 执行单步采样
             x = self.p_sample(x, cond, timesteps)
-            # 再次强制应用条件
             x = apply_conditioning(x, cond, self.action_dim)
 
             progress.update({'t': i})

@@ -10,11 +10,9 @@ import logging
 from utils.eval import evaluate_dismatch_metrics, evaluate_trajectory_quality
 from utils.logger import flatten_metrics, save_csv_native
 
-# 获取 Hydra 提供的 logger
 log = logging.getLogger(__name__)
 
 def sample_and_eval(cfg: DictConfig):
-    # 读取环境配置并初始化环境
 
     device = cfg.device
     
@@ -90,7 +88,6 @@ def sample_and_eval(cfg: DictConfig):
     log_dict = flatten_metrics(log_dict, check_horizon)
     save_csv_native(log_dict, save_path="final_eval_metrics.csv")
 
-    # 保存轨迹
     np.savez(
         file="sampled_traj.npz",
         generated_traj=gene_traj,

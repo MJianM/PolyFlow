@@ -32,10 +32,10 @@ class ResidualTemporalBlock(nn.Module):
 
     def forward(self, x, t):
         '''
-            输入:
+            input:
                 x : [ batch_size, inp_channels, horizon ]
                 t : [ batch_size, embed_dim ]
-            输出:
+            output:
                 out : [ batch_size, out_channels, horizon ]
         '''
         out = self.blocks[0](x) + self.time_mlp(t)
@@ -108,7 +108,7 @@ class TemporalUnet(nn.Module):
         '''
             输入:
                 x : [ batch_size, horizon, transition_dim ]
-                cond : [ batch_size, cond_dim ] (本实现中未使用)
+                cond : [ batch_size, cond_dim ] 
                 time : [ batch_size ]
             输出:
                 x : [ batch_size, horizon, transition_dim ]

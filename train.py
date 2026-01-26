@@ -23,17 +23,12 @@ from utils.utils import ot_minibatch_coupling
 from utils.eval import evaluate_dismatch_metrics, evaluate_trajectory_quality
 from utils.logger import flatten_metrics, save_csv_native
 
-# 获取 Hydra 提供的 logger
 log = logging.getLogger(__name__)
-# --- 注册自定义解析器用于处理文件路径 ---
 OmegaConf.register_new_resolver("abspath", lambda x: to_absolute_path(x))
 
 def train_worker(cfg: DictConfig):
-    # 读取环境配置并初始化环境
 
     device = cfg.train.device
-    # Hydra 会自动切换工作目录到 outputs/..., 所以 log_dir 设置为当前目录即可
-    # 这样 tensorboard 文件会保存在对应的 output 文件夹下
     writer = SummaryWriter(log_dir=".")
     
     log.info(f"Training Config:\n{OmegaConf.to_yaml(cfg)}")
@@ -51,16 +46,12 @@ def train_worker(cfg: DictConfig):
     dataloader = instantiate(cfg.train_dataloader, dataset=dataset)
     val_loader = instantiate(cfg.val_dataloader, dataset=dataset)
 
-    # ==========================================
-    # 2. 实例化 Model
-    # ==========================================
+
     log.info(f"Instantiating Model: {cfg.model._target_}")
     model = instantiate(cfg.model)
-    model.to(device) # 确保模型在设备上
+    model.to(device) 
 
-    # ==========================================
-    # 3. 实例化 Optimizer (Partial)
-    # ==========================================
+
     optimizer = instantiate(cfg.optimizer, params=model.parameters())
     scheduler = instantiate(cfg.lr_scheduler, optimizer=optimizer)
 
@@ -100,10 +91,8 @@ def train_worker(cfg: DictConfig):
         if i % cfg.train.save_freq == 0 and i > 0:
             torch.save(model.state_dict(), f'model_iter_{i}.pt')
 
-    # 保存最后模型
     torch.save(model.state_dict(), f'model_final.pt')
 
-    # 可视化模型生成效果，保存到tensorboard和文件中
     seq_length = dataset.seq_length
     x_dim = dataset.x_dim
     eval_samples = cfg.eval.eval_samples
@@ -118,7 +107,7 @@ def train_worker(cfg: DictConfig):
         max_plot=cfg.eval.max_plot_traj,
         save_path=f"final_traj_compare.png"
     )
-    # 计算指标
+
     check_horizon = [0, seq_length // 2, seq_length - 1]
     eval_metrics = evaluate_dismatch_metrics(
         generated_traj, true_traj, check_horizon_list=check_horizon, max_samples=1000
@@ -140,12 +129,10 @@ def train_worker(cfg: DictConfig):
 
 def train_batch_poly_flow(model, dataset, batch_data_dict, optimizer, scheduler, device, cfg):
 
-    # 数据移动
     batch_traj = batch_data_dict['traj'].float().to(device) # [batch_size, seq_length*x_dim]
     batch_A = batch_data_dict['A'].float().to(device) # [batch_size, seq_length, num_cons, x_dim]
     batch_b = batch_data_dict['b'].float().to(device) # [batch_size, seq_length, num_cons]
 
-    # 生成 Prior (dataset 方法)
     x1 = batch_traj
     x0, _, _ = dataset.generate_prior_data(batch_size=x1.shape[0], A=batch_A, b=batch_b)
     x0 = x0.float().to(device)
@@ -176,7 +163,6 @@ def train_batch_poly_flow(model, dataset, batch_data_dict, optimizer, scheduler,
 
 def train_batch_flow_matching(model, dataset, batch_data_dict, optimizer, scheduler, device, cfg):
 
-    # 数据移动
     batch_traj = batch_data_dict['traj'].float().to(device) # [batch_size, seq_length*x_dim]
     batch_A = batch_data_dict['A'].float().to(device) # [batch_size, seq_length, num_cons, x_dim]
     batch_b = batch_data_dict['b'].float().to(device) # [batch_size, seq_length, num_cons]
@@ -187,15 +173,12 @@ def train_batch_flow_matching(model, dataset, batch_data_dict, optimizer, schedu
 
     x1 = batch_traj.reshape(batch_size, seq_length, x_dim)
 
-    # 1. 采样时间 t ~ U(0, 1)
+    # t ~ U(0, 1)
     t = torch.rand(batch_size, device=device)
-    # 2. 采样单位高斯噪声 x0
     x0 = torch.randn_like(x1)
-    # 3. 计算 t时刻的中间状态 xt (最优传输路径)
     xt = (1 - t.view(batch_size, 1, 1)) * x0 + t.view(batch_size, 1, 1) * x1
-    # 4. 目标速度 (Conditional Vector Field)
+    # Conditional Vector Field
     ut = x1 - x0
-    # 5. 预测并计算 MSE Loss
     vt = model(xt, t)
     loss = F.mse_loss(vt, ut)
 
@@ -208,7 +191,6 @@ def train_batch_flow_matching(model, dataset, batch_data_dict, optimizer, schedu
     return loss
 
 def run_eval(model, val_loader, dataset, env, writer, step_i, cfg, device, log):
-    """将评估逻辑封装，保持主函数整洁"""
     model.eval()
     with torch.no_grad():
         try:
@@ -220,19 +202,18 @@ def run_eval(model, val_loader, dataset, env, writer, step_i, cfg, device, log):
         val_b = val_batch['b'].float().to(device)
         true_traj = val_batch['traj'].float().to(device) # (B, seq_len*x_dim)
 
-        x_dim = dataset.x_dim # 直接从 dataset 对象获取属性
+        x_dim = dataset.x_dim 
         B = true_traj.shape[0]
         true_traj = true_traj.view(B, -1, x_dim)
-        # 转换 true_traj 为 numpy 用于评估
+
         true_traj_np = true_traj.cpu().numpy()
-        # 2. 模型采样
-        # sample_discrete_delta 返回 numpy array (Steps+1, B, seq_len*x_dim)
+
+        #  (Steps+1, B, seq_len*x_dim)
         sampled_traj_np, total_time, avg_per_step_time = sample_worker(cfg, model, dataset, env, n_samples=B)
-        sampled_traj_np = sampled_traj_np[-1] # 取最终采样结果 (B, seq_len*x_dim)
+        sampled_traj_np = sampled_traj_np[-1] #  (B, seq_len*x_dim)
         sampled_traj_np = sampled_traj_np.reshape(B, -1, x_dim) # (B, T, D)
         
 
-        # 3. 计算指标
         max_seq = dataset.seq_length
         check_horizon = [0, max_seq // 2, max_seq - 1]
         
@@ -280,7 +261,6 @@ def main(cfg: DictConfig):
 
 @torch.no_grad()
 def sample_worker(cfg: DictConfig, model, dataset: TrajDataset, env, n_samples=10):
-    """封装采样逻辑，保持主函数整洁"""
     device = cfg.sample.device
     steps = cfg.sample.steps
     method = cfg.sample.method
@@ -313,11 +293,9 @@ def sample_safeflow(model, dataset: TrajDataset, env, n_samples=10, steps=10, pr
     else:
         safe_sampler = SafeFlowSampler(model, obstacles=obstacles, device=device)
 
-    # --- 计时开始 ---
     if device.type == 'cuda':
-        torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+        torch.cuda.synchronize() # 
     start_time = time.time()
-    # ----------------
 
     # (n_samples, seq_length, x_dim)
     gene_traj = safe_sampler.sample(n_samples=n_samples, horizon=dataset.seq_length, steps=steps,
@@ -326,13 +304,10 @@ def sample_safeflow(model, dataset: TrajDataset, env, n_samples=10, steps=10, pr
     #                                 use_cbf=True, use_closed_form=False)
     traj_history = [gene_traj.cpu().numpy().reshape(n_samples, -1)]
 
-    # --- 计时结束 ---
     if device.type == 'cuda':
-        torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+        torch.cuda.synchronize() 
     end_time = time.time()
-    # ----------------
 
-    # 计算统计数据
     total_time = end_time - start_time
     avg_time_per_step = total_time / steps
 
@@ -347,15 +322,12 @@ def sample_flow_matching(model, dataset: TrajDataset, env, n_samples=10, steps=1
     seq_len = dataset.seq_length
     x_dim = dataset.x_dim
 
-    # 从纯噪声开始
     x = torch.randn((n_samples, seq_len, x_dim), device=device)
     traj_history = [x.cpu().numpy().reshape(n_samples, -1)]
 
-    # --- 计时开始 ---
     if device.type == 'cuda':
-        torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+        torch.cuda.synchronize() 
     start_time = time.time()
-    # ----------------
 
     dt = 1.0 / steps
     for i in range(steps):
@@ -376,13 +348,10 @@ def sample_flow_matching(model, dataset: TrajDataset, env, n_samples=10, steps=1
 
         traj_history.append(x.cpu().numpy().reshape(n_samples, -1))
 
-    # --- 计时结束 ---
     if device.type == 'cuda':
-        torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+        torch.cuda.synchronize() 
     end_time = time.time()
-    # ----------------
 
-    # 计算统计数据
     total_time = end_time - start_time
     avg_time_per_step = total_time / steps
 
@@ -397,12 +366,11 @@ def sample_diffusion_model(model, dataset: TrajDataset, env, n_samples=10, steps
 @torch.no_grad()
 def sample_discrete_delta(model: PolytopeConstrainedFlowModel, dataset: TrajDataset, env, n_samples=10, steps=10):
     """
-    采样过程: x_{k+1} = x_k + Model(x_k, t_k)
+    Sample process: x_{k+1} = x_k + Model(x_k, t_k)
     """
     device = next(model.parameters()).device
     model.eval()
     
-    # 1. 初始化噪声和约束condition
     # x [B, seq_length*x_dim]
     # A [B, seq_length, num_cons, x_dim]
     # b [B, seq_length, num_cons]
@@ -413,39 +381,27 @@ def sample_discrete_delta(model: PolytopeConstrainedFlowModel, dataset: TrajData
     
     print(f"Sampling with Delta Prediction ({steps} steps)...")
     
-    # --- 计时开始 ---
     if device.type == 'cuda':
-        torch.cuda.synchronize() # 等待数据传输等之前的所有 GPU 操作完成
+        torch.cuda.synchronize() 
     start_time = time.time()
-    # ----------------
 
     for k in range(steps):
-        # 构造当前时间 t (归一化到 [0, 1])
         t_curr = torch.ones(n_samples, device=device) * (k / steps)
         
-        # 2. 模型预测 Delta
         pred_delta, _, _ = model(x, t_curr, A, b)
         
-        # 3. 更新位置 (直接相加)
         x = x + pred_delta
         
-        # 记录轨迹
         traj_history.append(x.cpu().numpy())
         
-    # --- 计时结束 ---
     if device.type == 'cuda':
-        torch.cuda.synchronize() # 等待最后一步 GPU 运算完成
+        torch.cuda.synchronize() 
     end_time = time.time()
-    # ----------------
 
-    # 计算统计数据
     total_time = end_time - start_time
     avg_time_per_step = total_time / steps
     
-
     return np.array(traj_history), total_time, avg_time_per_step
-
-
 
 if __name__ == "__main__":
     main()

@@ -18,13 +18,10 @@ from utils.eval import evaluate_dismatch_metrics, evaluate_trajectory_quality
 from utils.logger import flatten_metrics, save_csv_native
 from train import sample_worker
 
-# 获取 Hydra 提供的 logger
 log = logging.getLogger(__name__)
-# # --- 注册自定义解析器用于处理文件路径 ---
 # OmegaConf.register_new_resolver("abspath", lambda x: to_absolute_path(x))
 
 def sample_and_eval(cfg: DictConfig):
-    # 读取环境配置并初始化环境
 
     device = cfg.device
     
@@ -41,19 +38,15 @@ def sample_and_eval(cfg: DictConfig):
     log.info(f"Instantiating Env: {cfg.env._target_}")
     env = instantiate(cfg.env)
 
-    # ==========================================
-    # 2. 实例化 Model
-    # ==========================================
     log.info(f"Instantiating Model: {cfg.model._target_}")
     model = instantiate(cfg.model)
-    model.to(device) # 确保模型在设备上
+    model.to(device) 
 
     load_data = torch.load(cfg.sample.load_model_path, map_location=device)
     model.load_state_dict(load_data)
 
     model.eval()
 
-    # 可视化模型生成效果，保存到tensorboard和文件中
     seq_length = dataset.seq_length
     x_dim = dataset.x_dim
     eval_samples = cfg.eval.eval_samples
@@ -68,7 +61,7 @@ def sample_and_eval(cfg: DictConfig):
         max_plot=cfg.eval.max_plot_traj,
         save_path=f"final_traj_compare.png"
     )
-    # 保存轨迹
+
     np.savez(
         file="sampled_traj.npz",
         generated_traj=generated_traj,
@@ -76,7 +69,7 @@ def sample_and_eval(cfg: DictConfig):
         seq_length=seq_length,
         x_dim=x_dim
     )
-    # 计算指标
+
     check_horizon = [0, seq_length // 2, seq_length - 1]
     eval_metrics = evaluate_dismatch_metrics(
         generated_traj, true_traj, check_horizon_list=check_horizon, max_samples=1000

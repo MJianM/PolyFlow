@@ -15,31 +15,28 @@ from gymnasium.wrappers import RecordVideo
 
 @contextlib.contextmanager
 def virtual_display(display_id=":99", screen_size="1024x768x24"):
-    """虚拟显示上下文管理器"""
     xvfb_process = None
     original_display = os.environ.get("DISPLAY")
     
     try:
         if "DISPLAY" not in os.environ:
-            print(f"启动Xvfb虚拟显示 {display_id}...")
+            print(f"activate Xvfb {display_id}...")
             xvfb_process = subprocess.Popen(
                 ["Xvfb", display_id, "-screen", "0", screen_size]
             )
             os.environ["DISPLAY"] = display_id
-            # 给Xvfb一点启动时间
+
             import time
             time.sleep(1)
         
-        yield  # 这里执行主程序代码
+        yield  
         
     finally:
-        # 清理：关闭Xvfb并恢复原来的DISPLAY设置
         if xvfb_process is not None and xvfb_process.poll() is None:
-            print("关闭Xvfb进程...")
+            print("close Xvfb session...")
             xvfb_process.terminate()
             xvfb_process.wait()
         
-        # 恢复原来的DISPLAY环境变量
         if original_display is not None:
             os.environ["DISPLAY"] = original_display
         elif "DISPLAY" in os.environ:
@@ -369,7 +366,7 @@ def collect_data():
     env = RecordVideo(
         env=env,
         video_folder="./maze_videos",
-        episode_trigger=lambda x: x>=0 and x<5, # 只录制前5条episode
+        episode_trigger=lambda x: x>=0 and x<5, 
         disable_logger=True
     )
 
@@ -412,7 +409,7 @@ def collect_data():
 
     # 关闭环境确保视频保存
     env.close()
-    print("视频已保存至 ./maze_videos 文件夹")
+    print("Vedio saved in ./maze_videos")
 
 
 if __name__=="__main__":

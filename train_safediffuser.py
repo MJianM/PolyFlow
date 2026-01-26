@@ -21,18 +21,15 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from utils.eval import evaluate_dismatch_metrics, evaluate_trajectory_quality
 from utils.logger import flatten_metrics, save_csv_native
 
-# 获取 Hydra 提供的 logger
+
 log = logging.getLogger(__name__)
-# --- 注册自定义解析器用于处理文件路径 ---
+
 OmegaConf.register_new_resolver("abspath", lambda x: to_absolute_path(x))
 
 
 def train_worker(cfg: DictConfig):
-    # 读取环境配置并初始化环境
 
     device = cfg.train.device
-    # Hydra 会自动切换工作目录到 outputs/..., 所以 log_dir 设置为当前目录即可
-    # 这样 tensorboard 文件会保存在对应的 output 文件夹下
     writer = SummaryWriter(log_dir=".")
     
     log.info(f"Training Config:\n{OmegaConf.to_yaml(cfg)}")
@@ -71,7 +68,6 @@ def train_worker(cfg: DictConfig):
     log.info("Training completed.")
     trainer.save("final")
     
-    # 评估阶段
     log.info("Starting evaluation...")
 
 

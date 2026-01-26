@@ -5,13 +5,8 @@ import math
 from utils.utils import build_mlp, create_block_diagonal_mask, create_block_cross_attention_mask, EfficientRayShootingLayer
 
 class SequencePositionalEncoding(nn.Module):
-    """
-    标准的正弦位置编码 (Sinusoidal Positional Encoding)
-    用于给序列中的 Token 增加位置信息 (Sequence Order)
-    """
     def __init__(self, d_model, max_len=5000):
         super().__init__()
-        # 创建一个足够长的 PE 矩阵
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
@@ -19,47 +14,33 @@ class SequencePositionalEncoding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         
-        # [1, max_len, d_model] 以便广播
+        # [1, max_len, d_model] 
         pe = pe.unsqueeze(0)
         
-        # 注册为 buffer，不是模型参数，不参与梯度更新，但随模型保存
         self.register_buffer('pe', pe)
 
     def forward(self, x, step_repeat=1):
-        """
-        Args:
-            x: 输入 tensor，主要用于获取 device 和 dtype，形状为 (B, T*step_repeat, embed_dim)
-            step_repeat: 每个时间步重复多少次 (Block Size)
-                         如果 step_repeat > 1，则输出形式为 [pos0, pos0, pos1, pos1, ...]
-        Returns:
-            Sliced PE tensor matched to sequence length
-        """
-        # 假设需要的序列长度是 encoded length / step_repeat
-        # 例如输入 x 长度 400, step_repeat=4, 则实际的时间步 T=100
         seq_len = x.size(1) // step_repeat
         
-        # 获取前 seq_len 个位置编码: [1, T, d_model]
+        # [1, T, d_model]
         pe_slice = self.pe[:, :seq_len, :]
         
         if step_repeat > 1:
-            # 在 dim=1 重复每个位置编码 step_repeat 次
-            # 结果形状: [1, T * step_repeat, d_model]
+            # [1, T * step_repeat, d_model]
             pe_slice = pe_slice.repeat_interleave(step_repeat, dim=1)
             
         return pe_slice
 
 class CrossAttentionBlock(nn.Module):
-    """使用 PyTorch 内置 MultiheadAttention 实现的 Cross-Attention"""
     
     def __init__(self, embed_dim, num_heads, dropout=0.1):
         super(CrossAttentionBlock, self).__init__()
-        
-        # Cross-Attention: query 来自一个序列，key/value 来自另一个序列
+
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
             dropout=dropout,
-            batch_first=True  # PyTorch 2.0+ 支持
+            batch_first=True  
         )
         
         # Layer Normalization
@@ -79,18 +60,8 @@ class CrossAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, query, key_value, attn_mask=None, key_padding_mask=None):
-        """
-        Args:
-            query: [batch_size, target_len, embed_dim] - 来自一个序列
-            key_value: [batch_size, source_len, embed_dim] - 来自另一个序列
-            attn_mask: 注意力掩码
-            key_padding_mask: key 的填充掩码
-        """
-        # 保存残差连接
         residual = query
         
-        # Cross-Attention
-        # query 来自第一个序列，key/value 来自第二个序列
         attn_output, attn_weights = self.cross_attn(
             query=query,
             key=key_value,
@@ -100,7 +71,6 @@ class CrossAttentionBlock(nn.Module):
             need_weights=True
         )
         
-        # 残差连接 + LayerNorm
         query = self.norm1(residual + self.dropout(attn_output))
         
         # Feed-Forward Network
@@ -111,13 +81,10 @@ class CrossAttentionBlock(nn.Module):
         return query, attn_weights
     
 class SinusoidalTimeEmb(nn.Module):
-    """
-    针对 [0, 1] 浮点数输入的正弦位置编码
-    """
     def __init__(self, dim, scale=1000.0):
         super().__init__()
         self.dim = dim
-        self.scale = scale # 新增缩放因子
+        self.scale = scale 
 
     def forward(self, x):
         """
@@ -125,36 +92,28 @@ class SinusoidalTimeEmb(nn.Module):
         """
         device = x.device
         
-        # 1. 缩放输入：将 [0, 1] 映射到 [0, scale]
-        # 这样做的目的是防止输入过小导致 sin/cos 函数处于线性区（失去区分度）
         x = x * self.scale 
         
-        # 2. 计算频率项 (与之前逻辑一致)
         half_dim = self.dim // 2
         emb = math.log(10000) / (half_dim - 1)
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
         
-        # 3. 计算正弦特征
         # x: [B], emb: [D/2] -> [B, D/2]
         emb = x[:, None] * emb[None, :]
         
-        # 4. 拼接 sin 和 cos
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
 class AdaLNBlock(nn.Module):
-    """
-    支持时间条件注入的 Transformer Block (基于 AdaLN)。
-    """
     def __init__(self, hidden_dim, num_heads, mlp_ratio=4.0, dropout=0.0):
         super().__init__()
         
-        # 1. Self-Attention 模块
-        self.attn_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False) # 关闭默认的 affine 参数，由 AdaLN 接管
+        # 1. Self-Attention module
+        self.attn_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False) 
         self.attn = nn.MultiheadAttention(hidden_dim, num_heads, dropout=dropout, batch_first=True)
         
-        # 2. Feed Forward 模块
-        self.ffn_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False)  # 关闭默认的 affine 参数
+        # 2. Feed Forward module
+        self.ffn_norm = nn.LayerNorm(hidden_dim, elementwise_affine=False) 
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, int(hidden_dim * mlp_ratio)),
             nn.GELU(),
@@ -162,38 +121,20 @@ class AdaLNBlock(nn.Module):
             nn.Dropout(dropout)
         )
         
-        # 3. AdaLN 调制层 (Modulation)
-        # 它的作用是：根据 time_emb 预测出用于调节 LayerNorm 的 scale 和 shift 参数
-        # 我们需要预测 4 个参数：
-        # - shift_msa, scale_msa (用于 Attention 前的 Norm)
-        # - shift_mlp, scale_mlp (用于 FFN 前的 Norm)
-        # 所以输出维度是 4 * hidden_dim
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
             nn.Linear(hidden_dim, 4 * hidden_dim, bias=True)
         )
 
     def forward(self, x, time_emb, attn_mask=None, key_padding_mask=None):
-        """
-        x: [batch_size, seq_len, hidden_dim] - 序列输入 (例如动作序列或图像Patch)
-        time_emb: [batch_size, hidden_dim] - 时间嵌入向量
-        attn_mask: [seq_len, seq_len] 或 [batch_size * num_heads, seq_len, seq_len]
-                   用于屏蔽特定位置的注意力（如因果掩码）。
-        key_padding_mask: [batch_size, seq_len]
-                   用于屏蔽 Padding Token (True 表示被屏蔽/不参与计算)。
-        """
-        # 1. 计算调制参数 (Scale & Shift)
-        # shift_msa, scale_msa, shift_mlp, scale_mlp 形状均为 [batch_size, hidden_dim]
-        # chunk(4, dim=1) 将长向量切分成4份
+        # shift_msa, scale_msa, shift_mlp, scale_mlp [batch_size, hidden_dim]
         shift_msa, scale_msa, shift_mlp, scale_mlp = self.adaLN_modulation(time_emb).chunk(4, dim=1)
         
-        # 注意：需要 unsqueeze(1) 以便广播到 seq_len 维度: [batch_size, 1, hidden_dim]
+        # [batch_size, 1, hidden_dim]
         shift_msa, scale_msa = shift_msa.unsqueeze(1), scale_msa.unsqueeze(1)
         shift_mlp, scale_mlp = shift_mlp.unsqueeze(1), scale_mlp.unsqueeze(1)
 
-        # 2. Attention 块 (应用 AdaLN)
-        # 公式: x = x * (1 + scale) + shift
-        # 这里的 modulate 操作替代了标准的 LayerNorm 可学习参数
+        # x = x * (1 + scale) + shift
         x_norm = self.attn_norm(x)
         x_modulated = x_norm * (1 + scale_msa) + shift_msa
         
@@ -204,33 +145,18 @@ class AdaLNBlock(nn.Module):
             attn_mask=attn_mask,           
             key_padding_mask=key_padding_mask 
         )
-        x = x + attn_out # 残差连接
+        x = x + attn_out 
 
-        # 3. Feed Forward 块 (应用 AdaLN)
         x_norm = self.ffn_norm(x)
         x_modulated = x_norm * (1 + scale_mlp) + shift_mlp
         
         ffn_out = self.ffn(x_modulated)
-        x = x + ffn_out # 残差连接
+        x = x + ffn_out 
 
         return x
 
 class ConstraintEncoder(nn.Module):
-    """
-    处理 A, b 每行组成 token -> multi-head attention block
-    这是 Set Transformer 的一部分，用于处理 permutation-invariant 的约束集合。
-    """
     def __init__(self, x_dim, embed_dim, num_cons, max_seq, num_heads, num_layers=2, use_block_mask=True, device='cuda'):
-        """
-        Args:
-            x_dim: 网络输入维度其实是 x_dim (A的列数) + 1 (b的值)
-            embed_dim: Embedding 维度
-            num_cons: 每个点约束个数
-            max_seq: 轨迹点个数
-            num_heads: Transformer Heads
-            num_layers: Transformer Layers
-            use_block_mask: 是否只对每个点内的约束组进行self-attn
-        """
         super().__init__()
         self.num_cons = num_cons
         self.max_seq = max_seq
@@ -246,10 +172,8 @@ class ConstraintEncoder(nn.Module):
         else:
             self.mask = None
 
-        # 输入维度是 x_dim (A的列数) + 1 (b的值)
         self.input_proj = build_mlp(input_dim=x_dim+1, hidden_dims=[4*embed_dim], output_dim=embed_dim).to(self.device)
         
-        # 使用 Transformer Encoder 处理集合输入 (无位置编码，因为约束顺序无关)
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers).to(self.device)
 
@@ -258,13 +182,13 @@ class ConstraintEncoder(nn.Module):
         Docstring for forward
         
         :param self: Description
-        :param A: 形状 (B, S, num_cons, x_dim)
-        :param b: 形状 (B, S, num_cons)
-        :return 形状 (B, S, num_cons, embed_dim)
+        :param A: shape (B, S, num_cons, x_dim)
+        :param b: shape (B, S, num_cons)
+        :return shape (B, S, num_cons, embed_dim)
         """
         batch_size = A.shape[0]
 
-        # 拼接 -> [B, S, num_cons, x_dim+1]
+        # concate -> [B, S, num_cons, x_dim+1]
         constraints = torch.cat([A, b.unsqueeze(-1)], dim=-1)
         tokens = self.input_proj(constraints) # [batch, S, num_cons, embed_dim]
         
@@ -295,7 +219,6 @@ class TrajEncoder(nn.Module):
         self.max_seq = max_seq
         self.device = device
 
-        # 在轨迹序列维度进行时序编码
         self.positional_embedding = SequencePositionalEncoding(embed_dim, max_seq).to(device)
 
         self.input_proj = build_mlp(x_dim, hidden_dims=[4*embed_dim], output_dim=embed_dim).to(device)
@@ -314,7 +237,6 @@ class TrajEncoder(nn.Module):
         """
 
         tokens = self.input_proj(x)
-        # 添加轨迹时序维度的pe
         pe = self.positional_embedding(x, step_repeat=1)
         tokens = tokens + pe
 
@@ -338,7 +260,7 @@ class OneWeightDecoder(nn.Module):
 
         assert self.num_rays == 1
 
-        # input [batch_size, seq_length, x_dim+embed_dim] 最后一维表示 方向+模长 + 轨迹embed信息
+        # input [batch_size, seq_length, x_dim+embed_dim] 
 
         self.input_proj = build_mlp(x_dim, hidden_dims=[embed_dim], output_dim=embed_dim).to(device)
 
@@ -366,7 +288,7 @@ class OneWeightDecoder(nn.Module):
         tokens = self.input_proj(rays)
         tokens = tokens.reshape(batch_size, self.max_seq*self.num_rays, self.embed_dim)
 
-        tokens = tokens + traj_embed  # fusion 融合轨迹信息和边界信息
+        tokens = tokens + traj_embed  
 
         for block in self.attn_blocks:
             tokens = block(tokens, t_embed, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
@@ -464,7 +386,6 @@ class PolytopeConstrainedFlowModel(nn.Module):
             device=device
         )
 
-        # 对flow的时间输入进行编码
         self.time_mlp = nn.Sequential(
             SinusoidalTimeEmb(dim=embed_dim, scale=time_embed_scale),
             nn.Linear(embed_dim, embed_dim),
@@ -484,16 +405,13 @@ class PolytopeConstrainedFlowModel(nn.Module):
         else:
             self.cross_attn_mask = None
 
-        # 输出rays头
         self.ray_mlp = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, num_rays*x_dim)
         ).to(device)
 
-        # 计算边界点
         self.ray_shooter = EfficientRayShootingLayer().to(device)
 
-        # 计算weight
         self.weight_decoder = WeightDecoder(
             x_dim=x_dim, embed_dim=embed_dim, max_seq=max_seq, num_rays=num_rays,
             num_heads=num_heads_weight, num_layers=num_layers_weight, device=device
@@ -516,10 +434,9 @@ class PolytopeConstrainedFlowModel(nn.Module):
 
         batch_size = x.size(0)
 
-        # 数据整形
         x_reshaped = x.view(batch_size, self.max_seq, self.x_dim)
 
-        # 构造时间embed (B, embed_dim)
+        # (B, embed_dim)
         t_emb = self.time_mlp(t)
 
         # (B, S, embed_dim)
@@ -594,7 +511,6 @@ class PolytopeConstrainedOneRayFlowModel(nn.Module):
             device=device
         )
 
-        # 对flow的时间输入进行编码
         self.time_mlp = nn.Sequential(
             SinusoidalTimeEmb(dim=embed_dim, scale=time_embed_scale),
             nn.Linear(embed_dim, embed_dim),
@@ -614,16 +530,13 @@ class PolytopeConstrainedOneRayFlowModel(nn.Module):
         else:
             self.cross_attn_mask = None
 
-        # 输出rays头
         self.ray_mlp = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, num_rays*x_dim)
         ).to(device)
 
-        # 计算边界点
         self.ray_shooter = EfficientRayShootingLayer().to(device)
 
-        # 计算weight
         # self.weight_decoder = WeightDecoder(
         #     x_dim=x_dim, embed_dim=embed_dim, max_seq=max_seq, num_rays=num_rays,
         #     num_heads=num_heads_weight, num_layers=num_layers_weight, device=device
@@ -650,10 +563,9 @@ class PolytopeConstrainedOneRayFlowModel(nn.Module):
 
         batch_size = x.size(0)
 
-        # 数据整形
         x_reshaped = x.view(batch_size, self.max_seq, self.x_dim)
 
-        # 构造时间embed (B, embed_dim)
+        # (B, embed_dim)
         t_emb = self.time_mlp(t)
 
         # (B, S, embed_dim)

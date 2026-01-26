@@ -5,12 +5,12 @@ defaults:
   - env: maze2d
   - model: dit
   - default
-  - _self_  # 允许主配置覆盖默认值
+  - _self_  
 
-# 实验名称 (用于文件夹命名)
+
 env_name: "maze2d"
 algo_name: "safeflow"
-run_name: "sample" # 这次实验的名字
+run_name: "sample" # current run
 seed: 42
 device: "cuda:0"
 
@@ -21,7 +21,7 @@ steps: 200 #
 
 file_path: "data/large_maze_traj_data_expand_02.npz"
 
-# 采样参数
+
 sample:
   method: "safeflow" # discrete, flow, diffusion, safeflow
   load_model_path: "outputs/maze2d/flow_train/42_2025-12-24_14-50-13/model_final.pt"

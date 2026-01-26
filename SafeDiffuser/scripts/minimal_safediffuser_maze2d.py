@@ -27,16 +27,7 @@ class MazeObs:
                  obs_expand_dis = 0.2,
                  ellips_n = 4,
                  alpha: float = 0.5):
-        """
-        Docstring for __init__
-        
-        :param self: Description
-        :param maze: 迷宫环境
-        :param rect_list: 
-        :param obs_expand_dis 障碍物膨胀距离
-        :param ellips_n 超椭圆的阶数
-        :param alpha: 缩放系数 [0, 1]
-        """
+
         assert alpha >= 0 and alpha <= 1
 
         self.alpha = alpha
@@ -52,9 +43,7 @@ class MazeObs:
 
         ellips_list = []
         for rect in self.rect_list:
-            # 左上角格子中心
             p_min = self.maze.cell_rowcol_to_xy(np.array([rect.r_min, rect.c_min]))
-            # 右下角格子中心
             p_max = self.maze.cell_rowcol_to_xy(np.array([rect.r_max, rect.c_max]))
 
             half_scale = self.maze.maze_size_scaling * 0.5
@@ -67,13 +56,10 @@ class MazeObs:
             x_length = x_max - x_min
             y_length = y_max - y_min
 
-            # 最大内切椭圆
             a_in = x_length * 0.5
             b_in = y_length * 0.5
-            # 最小外接椭圆
             a_out = x_length * 0.5 * math.pow(2, 1.0 / self.ellips_n)
             b_out = y_length * 0.5 * math.pow(2, 1.0 / self.ellips_n)
-            # 使用参数alpha控制近似程度
             a = a_in + (a_out - a_in) * self.alpha
             b = b_in + (b_out - b_in) * self.alpha
 
