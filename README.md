@@ -1,42 +1,40 @@
 # PolyFlow
 
+# 该代码是 PolyFlow: Safety Guaranteed and Sample Efficient Flow Matching via Constraint Embedding and Projection-free Update ICML2026 投稿论文的代码
+
 ## 框架介绍
 
-* env: 环境交互类
-* dataset: 数据集类
-* backbone: 模型架构
-* algorithm: 方法类（diffusion, flow）
-* trainer: 训练类
-* policy: 策略类
+TODO: 根据pdf文章简要介绍方法，并且给出figs/文件夹下面的两张图（并排放置）
 
-## 如何运行？
+## 依赖安装
 
-### diffusion
-* 训练 diffusion 
-```bash
-python train_diffusion.py --config-name=train_diffusion_hopper.yaml
+该项目基于 python==3.10, 建议新建conda环境，并基于 requirements.txt 安装依赖
+
+## 运行代码
+
+我们将maze2d任务和locomotion任务分别放到 maze 和 locomotion 两个分支下。
+
+如果想运行locomotion任务，执行下面命令
+```
+git switch locomotion
 ```
 
-* 训练 diffusion classifier
-```bash
-python train_diffusion_value.py --config-name=train_diffusion_value_hopper.yaml
+要训练PolyFlow模型，执行下面命令：
 ```
+python train_polyflow.py --config-name=train_polyflow_xxxxxx_fixcons.yaml
+```
+其中 xxxx 填入不同的任务名称：hoppercpx: Hopper-Simple; hoppercpx2: Hopper-Complex; walkercpx: Walker2d-Simple; walkercpx2: Walker2d-Complex
 
-* 采样
-```bash
-python sample_diffusion.py --config-name=sample_diffusion_hopper.yaml
-```
+训练结果会保存到 outputs/ 文件夹下
 
-* guided 采样
-```bash
-python sample_diffusion_guide.py --config-name=sample_diffusion_guide_hopper.yaml
+如果想进行rollout，执行下面命令：
 ```
+python sample_polyflow.py --config-name=time_polyflow_xxxxxx_fixcons.yaml eval.load_model_path=yyyyy
+```
+其中 yyyy 处填入对应的模型保存路径
 
-### flow
-* 训练 flow
-```bash
-python train_flow.py --config-name=train_flow_hopper.yaml
-```
+
 
 # Acknowledgements
-The diffusion model implementation and organization are based on Michael Janner's diffuser repo: https://github.com/jannerm/diffuser
+
+其中有关diffusion和safediffuser的代码参考了 https://github.com/jannerm/diffuser 和 https://github.com/Weixy21/SafeDiffuser 两个项目。

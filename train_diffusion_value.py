@@ -17,15 +17,14 @@ from src.utils.logger import flatten_metrics, save_csv_native
 from src.utils.arrays import apply_dict, set_all_seed
 from src.utils.video import virtual_display
 
-# 获取 Hydra 提供的 logger
+
 log = logging.getLogger(__name__)
 
 def train_worker(cfg: DictConfig):
-    # 读取环境配置并初始化环境
+
 
     device = cfg.device
-    # Hydra 会自动切换工作目录到 outputs/..., 所以 log_dir 设置为当前目录即可
-    # 这样 tensorboard 文件会保存在对应的 output 文件夹下
+
     writer = SummaryWriter(log_dir=".")
     
     log.info(f"Training Config:\n{OmegaConf.to_yaml(cfg)}")
@@ -48,9 +47,6 @@ def train_worker(cfg: DictConfig):
     log.info(f"Instantiating Diffusion: {cfg.algorithm._target_}")
     diffusion = instantiate(cfg.algorithm, model=backbone).to(device)
     # CRITICAL: Set normalization parameters for the safety check.
-    # The 'invariance' method in diffusion.py relies on self.norm_mins/maxs 
-    # to normalize coordinates for obstacle checking.
-    # Note: dataset.normalizer is a DatasetNormalizer, we need the specific normalizer for observations
     if cfg.dataset.normalizer == 'GaussianNormalizer':
         diffusion.means = torch.from_numpy(dataset.normalizer.normalizers['observations'].means).to(device).float()
         diffusion.stds = torch.from_numpy(dataset.normalizer.normalizers['observations'].stds).to(device).float()

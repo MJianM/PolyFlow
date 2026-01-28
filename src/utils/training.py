@@ -83,7 +83,6 @@ class Trainer(object):
             pin_memory=pin_memory
         ))
         
-        # Vis loader usually small, keep default or optimize similarly if needed
         self.dataloader_vis = cycle(torch.utils.data.DataLoader(
             self.dataset, batch_size=1, num_workers=0, shuffle=True, pin_memory=pin_memory
         ))
@@ -112,7 +111,6 @@ class Trainer(object):
 
     def train(self, n_train_steps, use_cosine_scheduler=False, use_grad_clip=False, grad_clip_norm=1.0, writer=None):
 
-        # T_max 设置为 n_train_steps，意味着在训练结束时 LR 会降到最低 (默认 0)
         if use_cosine_scheduler:
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer, 
@@ -126,9 +124,7 @@ class Trainer(object):
                 batch = next(self.dataloader)
                 batch = batch_to_device(batch, device=self.device)
 
-                # 如果是 poly 约束，从dataset中采样初始分布
                 if hasattr(self.dataset, "raw_A"):
-                    # 确保 generate_prior_data 使用正确的 device
                     x0, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0], device=self.device)
                     loss, infos = self.model.loss(*batch, x0)
                 else:
@@ -188,62 +184,3 @@ class Trainer(object):
         self.model.load_state_dict(data['model'])
         self.ema_model.load_state_dict(data['ema'])
 
-
-class Go2Trainer(Trainer):
-
-    def train(self, n_train_steps, use_cosine_scheduler=False, use_grad_clip=False, grad_clip_norm=1.0, writer=None):
-
-        # T_max 设置为 n_train_steps，意味着在训练结束时 LR 会降到最低 (默认 0)
-        if use_cosine_scheduler:
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer, 
-                T_max=n_train_steps, 
-                eta_min=1e-6
-            )
-
-        timer = Timer()
-        for step in range(n_train_steps):
-            for i in range(self.gradient_accumulate_every):
-                batch = next(self.dataloader)
-                batch = batch_to_device(batch, device=self.device)
-
-                x0, _, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0],
-                            A_0=batch.A[:, 0:1], b_0=batch.b[:, 0:1], contact_0=batch.contact[:, 0:1], device=self.device, h_0=batch.vertex[:, 0:1])
-                loss, infos = self.model.loss(*batch, x0)
-
-                # # 如果是 poly 约束，从dataset中采样初始分布
-                # if hasattr(self.dataset, "raw_A"):
-                #     # 确保 generate_prior_data 使用正确的 device
-                #     x0, _, _ = self.dataset.generate_prior_data(batch_size=batch.trajectories.shape[0], device=self.device)
-                #     loss, infos = self.model.loss(*batch, x0)
-                # else:
-                #     loss, infos = self.model.loss(*batch)
-
-                loss = loss / self.gradient_accumulate_every
-                loss.backward()
-
-            if use_grad_clip:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_norm)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-            if use_cosine_scheduler:
-                scheduler.step()
-
-            if self.step % self.update_ema_every == 0:
-                self.step_ema()
-
-            if self.step % self.save_freq == 0:
-                label = self.step // self.label_freq * self.label_freq
-                self.save(label)
-
-            if self.step % self.log_freq == 0:
-                infos_str = ' | '.join([f'{key}: {val:8.4f}' for key, val in infos.items()])
-                current_lr = self.optimizer.param_groups[0]['lr']
-                print(f'{self.step}: {loss:8.4f} | {infos_str} | lr: {current_lr:8.6f} | t: {timer():8.4f}', flush=True)
-
-                if writer:
-                    writer.add_scalar("Train/Loss", loss.item(), step)
-                    writer.add_scalar("Train/LR", current_lr, step)
-                    writer.add_scalar("Train/Loss_a0", infos['a0_loss'].item(), step)
-
-            self.step += 1

@@ -31,18 +31,13 @@ def compute_ot_permutation_indices(x0, x1):
         x0_flat = x0.reshape(B, -1)
         x1_flat = x1.reshape(B, -1)
 
-        # 1. Compute Cost Matrix (Squared Euclidean Distance)
         M = torch.cdist(x0_flat, x1_flat, p=2) ** 2
         M_np = M.cpu().numpy()
 
-        # 2. Solve OT
         a = ot.unif(B)
         b = ot.unif(B)
         gamma = ot.emd(a, b, M_np) # Transport plan
 
-        # 3. Get Permutation Indices
-        # gamma[i, j] = 1/B means x0[i] matches x1[j]
-        # We want to find j for each i.
         gamma_torch = torch.from_numpy(gamma).to(x0.device)
         perm_indices = torch.argmax(gamma_torch, dim=1)
         
@@ -57,8 +52,6 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
         u3_scale, u3_limit,
         u3_scale2, u3_limit2):
     """
-    使用 qpth 求解器精确计算 HalfCheetah 环境下的多约束 CBF 修正。
-    采用降维 QP 策略 (只优化涉及的 4 个维度)。
 
     Constraints:
     1. u0 + u1_scale * u1 <= u1_limit
@@ -66,7 +59,6 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
     3. u0 + u3_scale * u3 <= u3_limit
     4. - u0 + u3_scale2 * u3 <= u3_limit2
 
-    u0 u1 u3 u4 对应的是 x 的 0, 1, 3, 4索引维度
 
     Constraints (Barrier Functions h(x) >= 0):
     1. u1_limit - (x[0] + u1_scale * x[1]) >= 0
@@ -74,7 +66,6 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
     3. u3_limit - (x[0] + u3_scale * x[3]) >= 0
     4. u3_limit2 - ( - x[0] + u3_scale2 * x[3]) >= 0
 
-    涉及维度索引: 0, 1, 3, 4 (Reduced Dimension = 4)
 
     Args:
         model: Flow matching 模型 wrapper
@@ -82,15 +73,12 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
         cond: 条件输入
         t: (batch,) 时间张量
         dt: 步长
-        [Constraints params]: 约束参数 (scale 和 limit)
+        [Constraints params]: (scale and limit)
 
     Returns:
-        final_vel: (batch, horizon, full_dim) 修正后的速度场
+        final_vel: (batch, horizon, full_dim) 
     """
     
-    # ==========================================================
-    # 1. 基础准备: 预测流场与数据扁平化
-    # ==========================================================
     v_pred = model.model(x, cond, t)
     
     n_samples, horizon, full_dim = x.shape
@@ -101,55 +89,32 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
     x_flat = x.view(N, -1)
     v_flat = v_pred.view(N, -1)
     
-    # 处理时间 t (Broadcast to N)
+    # t (Broadcast to N)
     if t.dim() == 1:
         t_flat = t.unsqueeze(1).repeat(1, horizon).view(-1)
     else:
         t_flat = t.view(-1)
 
-    # ==========================================================
-    # 2. 提取子空间变量 (Subspace Extraction)
-    # 我们将问题投影到 4D 空间: [idx0, idx1, idx3, idx4]
-    # ==========================================================
     
-    # 定义局部索引映射 (Local Mapping)
-    # u_reduced vector order: [val_0, val_1, val_3, val_4]
-    # index 0 -> global 0
-    # index 1 -> global 1
-    # index 2 -> global 3
-    # index 3 -> global 4
-    
-    # 提取当前状态值 x
     x0 = x_flat[:, 0]
     x1 = x_flat[:, 1]
     x3 = x_flat[:, 3]
     x4 = x_flat[:, 4]
     
-    # 提取预测速度值 v (Lie Derivative 部分计算需要)
     v0 = v_flat[:, 0]
     v1 = v_flat[:, 1]
     v3 = v_flat[:, 3]
     v4 = v_flat[:, 4]
 
-    # ==========================================================
-    # 3. CBF 参数设置 (Class K Function)
-    # ==========================================================
+
     omega = 2.1 
     phi_0 = 10.0 
     t_safe = torch.clamp(t_flat, max=0.99)
     phi_1 = omega / ((1 - t_safe) ** 2)
     
     def get_gamma_h(h_val):
-        """根据 Barrier 值正负选择增益系数"""
         return torch.where(h_val >= 0, phi_0 * h_val, phi_1 * h_val)
 
-    # ==========================================================
-    # 4. 构建降维 QP 矩阵 G_reduced
-    # Form: G * u_corr <= h_vec
-    # Shape: (N, num_constraints, reduced_dim) => (N, 4, 4)
-    # G 的每一行对应约束的负梯度 (-Gradient)
-    # 局部变量顺序: [u_c0, u_c1, u_c3, u_c4]
-    # ==========================================================
     
     num_constraints = 4
     reduced_dim = 4
@@ -184,10 +149,6 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
     G_reduced[:, 3, 0] = -1.0        # coeff for u_c0
     G_reduced[:, 3, 2] = u3_scale2  # coeff for u_c3
 
-    # ==========================================================
-    # 5. 构建 QP 向量 h_vec (Inequality RHS)
-    # h_vec = Gradient^T * v_pred + gamma(h_val)
-    # ==========================================================
     
     h_vec = torch.zeros(N, num_constraints, device=device)
     
@@ -215,21 +176,17 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
     lf_h4 = 1.0 * v0 - u3_scale2 * v3
     h_vec[:, 3] = lf_h4 + get_gamma_h(h4_val)
 
-    # ==========================================================
-    # 6. 求解 Reduced QP
-    # Objective: min 0.5 * ||u_reduced||^2
-    # ==========================================================
     
-    # Q: (4, 4) 单位矩阵
+    # Q: (4, 4) 
     Q = torch.eye(reduced_dim, device=device)
-    # p: (N, 4) 零向量
+    # p: (N, 4) 
     p = torch.zeros(N, reduced_dim, device=device)
     # No equality constraints
     e = torch.Tensor().to(device)
     
     try:
         # u_reduced shape: (N, 4)
-        # 对应 [u_c0, u_c1, u_c3, u_c4]
+        # [u_c0, u_c1, u_c3, u_c4]
         u_reduced = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(
             Q, p, G_reduced, h_vec, e, e
         )
@@ -237,20 +194,14 @@ def solve_cbf_halfcheetah(model, x, cond, t, dt,
         print(f"HalfCheetah QP Solver failed: {err}")
         # Fallback to zero correction
         u_reduced = torch.zeros(N, reduced_dim, device=device)
-
-    # ==========================================================
-    # 7. 映射回全维度空间 (Scatter back)
-    # ==========================================================
     
     u_full = torch.zeros_like(v_flat)
     
-    # 将计算出的 4 个维度的修正量填回对应的全局索引
     u_full[:, 0] = u_reduced[:, 0] # global 0
     u_full[:, 1] = u_reduced[:, 1] # global 1
-    u_full[:, 3] = u_reduced[:, 2] # global 3 (注意: u_reduced index 2)
-    u_full[:, 4] = u_reduced[:, 3] # global 4 (注意: u_reduced index 3)
+    u_full[:, 3] = u_reduced[:, 2] # global 3 
+    u_full[:, 4] = u_reduced[:, 3] # global 4 
 
-    # 8. 叠加修正并还原形状
     final_vel_flat = v_flat + u_full
     final_vel = final_vel_flat.view(n_samples, horizon, full_dim)
     
@@ -261,7 +212,6 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
                    h_max=1.5, vel_scale=0.1, h_min=0.8, v_max=2.5, v_min=-2.5, 
                    z_idx=3, vz_idx=9):
     """
-    使用 qpth 求解器精确计算多约束 CBF 修正。
     
     Constraints:
     1. Momentum Ceiling: h1(x) = h_max - z - vel_scale * vz >= 0
@@ -280,10 +230,9 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
     Returns:
         final_vel: Corrected velocity field.
     """
-    # 1. 获取预测流场
+
     v_pred = model.model(x, cond, t)
     
-    # 2. 扁平化处理
     n_samples, horizon, full_dim = x.shape
     N = n_samples * horizon
     device = x.device
@@ -296,15 +245,13 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
     else:
         t_flat = t.view(-1)
 
-    # 3. 提取 2D 子空间的关键变量
-    # 我们只关心 z 和 vz
+
     z_curr = x_flat[:, z_idx]
     vz_curr = x_flat[:, vz_idx]
     
     dot_z = v_flat[:, z_idx]   # dz/dt
     dot_vz = v_flat[:, vz_idx] # dvz/dt
 
-    # 4. 准备 CBF 参数 (Gamma Function)
     omega = 2.1 
     phi_0 = 10.0 
     t_safe = torch.clamp(t_flat, max=0.99)
@@ -313,14 +260,9 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
     def get_gamma_h(h_val):
         return torch.where(h_val >= 0, phi_0 * h_val, phi_1 * h_val)
 
-    # ==========================================================
-    # 5. 构建降维后的 QP 矩阵 G_reduced
-    # 优化变量 u_reduced 是 2维向量: [u_z, u_vz]
-    # G 的形状从 (N, 4, full_dim) 变为 (N, 4, 2)
-    # ==========================================================
     
     num_constraints = 4
-    reduced_dim = 2 # 仅优化 u_z (idx 0) 和 u_vz (idx 1)
+    reduced_dim = 2 # u_z (idx 0) 和 u_vz (idx 1)
     
     G_reduced = torch.zeros(N, num_constraints, reduced_dim, device=device)
     
@@ -345,11 +287,6 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
     # G row = [0, -1]
     G_reduced[:, 3, 1] = -1.0
 
-    # ==========================================================
-    # 6. 构建 QP 向量 h_vec (不等式右侧)
-    # h_vec 的计算与维度无关，只取决于约束值的余量
-    # Shape: (N, 4)
-    # ==========================================================
     
     h_vec = torch.zeros(N, num_constraints, device=device)
     
@@ -373,22 +310,18 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
     lf_h4 = 1.0 * dot_vz
     h_vec[:, 3] = lf_h4 + get_gamma_h(h4_val)
 
-    # ==========================================================
-    # 7. 求解 2D QP
-    # min 0.5 * u_red^T Q u_red
-    # ==========================================================
     
-    # Q 是 2x2 单位矩阵
+    # Q 
     Q = torch.eye(reduced_dim, device=device)
     
-    # p 是 2维零向量 (N, 2)
+    # p (N, 2)
     p = torch.zeros(N, reduced_dim, device=device)
     
-    e = torch.Tensor().to(device) # 无等式约束
+    e = torch.Tensor().to(device) 
     
     try:
         # u_reduced shape: (N, 2)
-        # u_reduced[:, 0] 是 u_z， u_reduced[:, 1] 是 u_vz
+        # u_reduced[:, 0]  u_z， u_reduced[:, 1]  u_vz
         u_reduced = QPFunction(verbose=-1, solver=QPSolvers.PDIPM_BATCHED, eps=1e-3)(
             Q, p, G_reduced, h_vec, e, e
         )
@@ -396,18 +329,12 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
         print(f"Reduced QP Solver failed: {err}")
         u_reduced = torch.zeros(N, reduced_dim, device=device)
 
-    # ==========================================================
-    # 8. 映射回全维度空间 (Scatter/Map back)
-    # ==========================================================
     
-    # 创建全维度的修正向量 (初始全为0)
     u_full = torch.zeros_like(v_flat)
     
-    # 将 u_reduced 的结果填入对应的 z_idx 和 vz_idx
     u_full[:, z_idx] = u_reduced[:, 0]
     u_full[:, vz_idx] = u_reduced[:, 1]
 
-    # 9. 叠加并还原
     final_vel_flat = v_flat + u_full
     final_vel = final_vel_flat.view(n_samples, horizon, full_dim)
     
@@ -415,107 +342,68 @@ def solve_cbf_more_complex(model, x, cond, t, dt,
 
 
 def solve_cbf_complex(model, x, cond, t, dt, height_limit=1.5, vel_scale=0.1, z_idx=3, vz_idx=9):
-    """
-    计算基于动量约束 (Position + Velocity constraint) 的 CBF 修正流场。
-    约束公式: z + vel_scale * vz <= height_limit
-    即 h(x) = height_limit - z - vel_scale * vz >= 0
 
-    Args:
-        model: Flow matching 模型 wrapper。
-        x: (batch, horizon, full_dim) 当前状态张量。
-        cond: 条件输入。
-        t: (batch,) 时间张量。
-        dt: 步长 (用于 API 兼容)。
-        height_limit: 安全高度限制。
-        vel_scale: 速度对约束的权重系数 (alpha)。
-        z_idx: 状态 x 中 z 坐标的索引 (默认为 3，与你之前的代码一致)。
-        vz_idx: 状态 x 中 z 速度 (vz) 的索引。
-                注意：请根据你的 Hopper 数据集格式确认此索引！
-                通常如果是 [qpos, qvel]，vz 是 z_idx + num_qpos。
 
-    Returns:
-        final_vel: (batch, horizon, full_dim) 修正后的速度场。
-    """
-    # 1. 从 Flow Matching 模型获取预测流场 (Predicted Vector Field)
-    # v_pred 代表状态 x 的时间导数 dx/dt
     v_pred = model.model(x, cond, t)
     
-    # 2. 数据扁平化处理 (Batch Processing)
+
     n_samples, horizon, full_dim = x.shape
     N = n_samples * horizon
     
     x_flat = x.view(N, -1)
     v_flat = v_pred.view(N, -1)
     
-    # 处理时间 t 的维度，使其与 flattened x 对齐
+
     if t.dim() == 1:
         t_flat = t.unsqueeze(1).repeat(1, horizon).view(-1)
     else:
         t_flat = t.view(-1)
 
-    # 3. 定义 FMBF (Flow Matching Barrier Function) 参数
-    # 参考 SafeFlow 论文 Eq. 8 和 Eq. 10
-    omega = 2.1 
-    phi_0 = 10.0 # 安全区域内的增益系数
-    
-    # 防止 t=1 时除以零
-    t_safe = torch.clamp(t_flat, max=0.99) 
-    phi_1 = omega / ((1 - t_safe) ** 2) # 不安全趋近时的激增函数 (Blow-up)
 
-    # 4. 计算 Barrier Function h(x) 和 梯度向量 b
+    omega = 2.1 
+    phi_0 = 10.0 
+    
+    t_safe = torch.clamp(t_flat, max=0.99) 
+    phi_1 = omega / ((1 - t_safe) ** 2) 
+
+
     # h(x) = limit - z - scale * vz
     current_z = x_flat[:, z_idx]
     current_vz = x_flat[:, vz_idx]
     
     h = height_limit - (current_z + vel_scale * current_vz)
     
-    # 计算梯度 b = \nabla h(x)
-    # h 对 z 的导数是 -1
-    # h 对 vz 的导数是 -vel_scale
+
     b_vec = torch.zeros_like(x_flat)
     b_vec[:, z_idx] = -1.0
     b_vec[:, vz_idx] = -vel_scale
     
-    # 计算梯度范数 ||b||^2
     # ||b||^2 = (-1)^2 + (-vel_scale)^2 = 1 + vel_scale^2
     b_norm_sq = 1.0 + (vel_scale ** 2)
 
-    # 5. 计算增益项 Gamma(t, h) * h
-    # 如果 h >= 0 (安全)，使用线性增益 phi_0
-    # 如果 h < 0 (不安全/越界)，使用反比例增益 phi_1 强制拉回
     gamma_h = torch.where(
         h >= 0,
         phi_0 * h,
         phi_1 * h
     )
 
-    # 6. 计算投影判定项 'a' (Eq. 14)
-    # CBF 约束条件: b^T * v + gamma(h) >= 0
-    # 我们计算 a = b^T * v + gamma(h)，如果 a < 0 则需要修正
-    
-    # b^T * v 点积计算 (只在 z_idx 和 vz_idx 有值)
-    # v_flat[:, z_idx] 对应 z 的变化率 (即 vz)
-    # v_flat[:, vz_idx] 对应 vz 的变化率 (即 az, 加速度)
+
     b_dot_v = (-1.0 * v_flat[:, z_idx]) + (-vel_scale * v_flat[:, vz_idx])
     
     a = b_dot_v + gamma_h
 
-    # 7. 计算修正量 u (Eq. 16: QP Closed-form solution)
-    # Optimization target: min ||u||^2 s.t. a + b^T u >= 0
-    # Solution: u = max(0, -a / ||b||^2) * b (注意这里 a<0 时才修正，所以符号取反)
     
-    unsafe_mask = a < 0  # 找出违反 CBF 约束的样本
+    unsafe_mask = a < 0  
     
     u = torch.zeros_like(v_flat)
     
-    # 计算修正系数 lambda = -a / ||b||^2
+
     correction_scalar = -a[unsafe_mask] / b_norm_sq
     
-    # 应用修正: u = scalar * b
-    # unsqueeze(1) 用于广播 scalar 到向量维度
+
     u[unsafe_mask] = correction_scalar.unsqueeze(1) * b_vec[unsafe_mask]
 
-    # 8. 叠加修正并还原形状
+
     final_vel_flat = v_flat + u
     final_vel = final_vel_flat.view(n_samples, horizon, full_dim)
     
@@ -526,25 +414,25 @@ def rk4_step(model, x, cond, t, dt, **kwargs):
     Runge-Kutta 4 (RK4) integration step.
     Error: O(dt^5), Total Error: O(dt^4)
     """
-    # k1: 初始点的斜率
+
     k1 = model.model(x, cond, t)
     
-    # k2: 中点的斜率 (使用 k1 预测位置)
+
     x_2 = x + 0.5 * k1 * dt
     t_mid = t + 0.5 * dt
     k2 = model.model(x_2, cond, t_mid)
     
-    # k3: 中点的斜率 (使用 k2 预测位置)
+
     x_3 = x + 0.5 * k2 * dt
     # t_mid is same as above
     k3 = model.model(x_3, cond, t_mid)
     
-    # k4: 终点的斜率 (使用 k3 预测位置)
+
     x_4 = x + k3 * dt
     t_end = t + dt
     k4 = model.model(x_4, cond, t_end)
     
-    # 组合加权平均斜率
+
     v_final = (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
     
     # Integration
@@ -572,35 +460,25 @@ def guided_euler_step(model, x, cond, t, dt, guide=None, scale=1.0, n_guide_step
     """
     grad_value = 0.0
     
-    # 1. Guidance Optimization (Optional Inner Loop)
-    # 在计算这一步的流动方向之前，先根据 guide 修正当前位置 x
     if guide is not None and n_guide_steps > 0:
         # Clone current x to avoid modifying the integration path variable directly in case of errors
         x_guided = x.clone()
 
         for _ in range(n_guide_steps):
-            # Critical Fix: 
-            # ValueGuide.gradients calls x.requires_grad_().
-            # This requires x to be a leaf variable (detached from graph).
+
             x_guided = x_guided.detach()
 
-            # Enable grad specifically for the guide calculation
             with torch.enable_grad():
                 # returns value (y) and gradient (grad)
                 y, grad = guide.gradients(x_guided, cond, t)
 
-            # Gradient Ascent (assuming we want to maximize the value y)
-            # If y is a cost to minimize, change '+' to '-'
             x_guided = x_guided + scale * grad
             
-            # Re-apply conditioning (Ensure constraints are met during optimization)
             x_guided = apply_conditioning(x_guided, cond, model.action_dim)
         
-        # Update x to the optimized position
         x = x_guided
         grad_value = y.mean().item()
 
-    # 2. ODE Flow Step
     v_pred = model.model(x, cond, t)
     x_next = x + v_pred * dt
     
@@ -681,41 +559,24 @@ class FlowMatching(nn.Module):
         batch_size = len(x)
         device = x.device
 
-        # 1. Sample continuous time t uniform in [0, 1]
         # shape: (batch,)
         t = torch.rand((batch_size,), device=device)
 
-        # 2. Sample noise x_0 from standard normal
         x_0 = torch.randn_like(x)
         x_1 = x # The target data
 
-        # 3. Compute Interpolation (Optimal Transport Path)
         # Formula: x_t = (1 - t) * x_0 + t * x_1
         # Reshape t for broadcasting: (batch,) -> (batch, 1, 1)
         t_b = t.view(batch_size, 1, 1)
         x_t = (1 - t_b) * x_0 + t_b * x_1
 
-        # 4. Apply conditioning to model input
-        # 这一点借鉴了你的 Diffusion 实现：强制模型输入的特定维度（如起点）符合条件
-        # 这有助于模型在推理时感知到正确的上下文
+        # apply conditioning to model input
         x_t = apply_conditioning(x_t, cond, self.action_dim)
 
-        # 5. Model Forward
-        # Predict the vector field v_t
-        # model signature: (x, cond, t)
         v_pred = self.model(x_t, cond, t)
 
-        # 6. Compute Target Velocity
-        # For OT path x_t = (1-t)x_0 + t*x_1, the derivative dx/dt is (x_1 - x_0)
         v_target = x_1 - x_0
 
-        # Note: 
-        # 在 Diffusion 实现中，你对 output (x_recon) 再次使用了 apply_conditioning。
-        # 在 Flow Matching 中，模型预测的是速度 v 而不是状态 x。
-        # 对速度应用状态的 conditioning 数值上通常是不对的，且 v_target 已经包含了由 x_1 确定的方向信息，
-        # 所以这里通常不需要对 v_pred 进行 apply_conditioning。
-
-        # 7. Compute Loss
         loss, info = self.loss_fn(v_pred, v_target)
 
         return loss, info
@@ -789,7 +650,6 @@ class FlowMatching(nn.Module):
             x, values = sample_fn(self, x, cond, t, dt, guide=guide, **sample_kwargs)
 
             # 5. Re-apply conditioning
-            # 这一步非常重要，确保轨迹始终“锚定”在起始点/终点约束上
             x = apply_conditioning(x, cond, self.action_dim)
 
             if return_chain: chain.append(x)
@@ -867,22 +727,19 @@ class SafeFlowMathcing(FlowMatching):
         device = next(iter(self.model.parameters())).device # assuming model is on correct device
         batch_size = shape[0]
 
-        # 1. Start from Noise (t=0)
         x = torch.randn(shape, device=device)
         
-        # 2. Force start condition
         x = apply_conditioning(x, cond, self.action_dim)
 
         chain = [x] if return_chain else None
         
-        # Setup progress bar
         iterator = range(self.n_timesteps)
         progress = utils.Progress(self.n_timesteps) if verbose else utils.Silent()
         
         # Define time step size dt = 1 / N
         dt = 1.0 / self.n_timesteps
 
-        # 3. Integration Loop: t goes from 0 to 1
+        # Integration Loop: t goes from 0 to 1
         for i in iterator:
             # Current time t (scalar)
             t_value = i / self.n_timesteps
@@ -890,8 +747,7 @@ class SafeFlowMathcing(FlowMatching):
             # Create batch time tensor
             t = torch.full((batch_size,), t_value, device=device, dtype=torch.float32)
 
-            # 4. Step: x_{t+1} <- x_t + v(x_t)*dt
-            # sample_fn returns next_x and any info (like guidance value)
+            # Step: x_{t+1} <- x_t + v(x_t)*dt
             if self.env_name == 'hopper' or self.env_name == 'walker2d':
                 v_final = self.model(x, cond, t)
             elif self.env_name == 'hopper_cpx2' or self.env_name == 'walker2d_cpx2':
@@ -950,7 +806,6 @@ class SafeFlowMathcing(FlowMatching):
             # euler step
             x = x + v_final * dt
 
-            # 5. Re-apply conditioning
             x = apply_conditioning(x, cond, self.action_dim)
 
             if return_chain: chain.append(x)
@@ -959,7 +814,6 @@ class SafeFlowMathcing(FlowMatching):
 
         if return_chain: chain = torch.stack(chain, dim=1)
         
-        # Return Sample namedtuple to match your interface
         values = torch.zeros(batch_size, device=x.device)
         return Sample(x, values, chain), 0
     
@@ -987,24 +841,17 @@ class DiscreteFlowMatching(FlowMatching):
 
 
         # --- Optimal Transport Pairing ---
-        # 注意：这里的重排只对固定约束的任务有效！
         if getattr(self, 'use_ot_batch', False):
-            # 1. 计算将 x 对齐到 x0 所需的索引
-            # 注意：这里假设 x0 是参考基准（通常是噪声），我们重排数据 x
+
             idx = compute_ot_permutation_indices(x0, x)
             
-            # 2. 重排 x (Target Data)
             x = x[idx]
             
-            # 3. 重排 cond (Conditioning)
-            # cond 是字典，需要遍历处理每一个 horizon_idx 对应的数据
             new_cond = {}
             for k, v in cond.items():
                 new_cond[k] = v[idx]
             cond = new_cond
             
-            # 4. 重排 A 和 b (Constraints)
-            # 约束通常也是绑定在具体的那条数据轨迹上的，必须同步重排
             if A is not None:
                 A = A[idx]
             if b is not None:
@@ -1021,13 +868,11 @@ class DiscreteFlowMatching(FlowMatching):
         x_next = (1 - t_next) * x0 + t_next * x
         target_delta = x_next - x_curr
         
-        # 4. Apply conditioning to model input
-        # 这有助于模型在推理时感知到正确的上下文
+        # Apply conditioning to model input
         x_curr = apply_conditioning(x_curr, cond, self.action_dim)
 
         pred_delta, _, _ = self.model(x_curr, cond, t_curr.flatten(), A, b)
 
-        # 对于obs condition部分，不计算loss
         target_delta[:, 0, self.action_dim:] = 0.0
         pred_delta[:, 0, self.action_dim:] = 0.0
         loss, info = self.loss_fn(pred_delta, target_delta)
@@ -1046,7 +891,7 @@ class DiscreteFlowMatching(FlowMatching):
         :param self: Description
         :param cond: Description
         :param verbose: Description
-        还必须输入以下参数：
+
         :param A (batch, horizon, num_cons, dim_c)
         :param b (batch, horizon, num_cons,)
         :param x0 (batch, horizon, act+obs) 初始分布采样
@@ -1093,17 +938,15 @@ class DiscreteFlowMatching(FlowMatching):
 
         x, A, b = x0.float().to(device), A.float().to(device), b.float().to(device)
         
-        # 2. Force start condition
         x = apply_conditioning(x, cond, self.action_dim)
 
         chain = [x] if return_chain else None
         
-        # Setup progress bar
         iterator = range(self.n_timesteps)
         progress = utils.Progress(self.n_timesteps) if verbose else utils.Silent()
         
 
-        # 3. Integration Loop: t goes from 0 to 1
+        # Integration Loop: t goes from 0 to 1
         for i in iterator:
             # Current time t (scalar)
             t_value = i / self.n_timesteps
@@ -1114,7 +957,6 @@ class DiscreteFlowMatching(FlowMatching):
             pred_delta, _, _ = self.model(x, cond, t, A, b)
             x = x + pred_delta
 
-            # 5. Re-apply conditioning
             x = apply_conditioning(x, cond, self.action_dim)
 
             if return_chain: chain.append(x)
@@ -1123,150 +965,6 @@ class DiscreteFlowMatching(FlowMatching):
 
         if return_chain: chain = torch.stack(chain, dim=1)
         
-        # Return Sample namedtuple to match your interface
-        values = torch.zeros((batch_size,), device=device, dtype=torch.float32)
-        return Sample(x, values, chain), 0
-    
-
-
-class DiscreteFlowMatchingGo2(FlowMatching):
-    
-    def loss(self, x, cond, A, b, contact, vertex, x0):
-        """
-        compute batch discrete flow matching loss
-        
-        :param self: Description
-        :param x: (batch, horizon, act_dim+obs_dim)
-        :param cond: dict {horizon_idx: (batch, obs_dim)}
-        :param A: (batch, horizon, 4, num_cons, 3)
-        :param b: (batch, horizon, 4, num_cons)
-        :param contact: (batch, horizon, 4)
-        :param vertex: (batch, horizon, 4, 3)
-        :param x0: (batch, horizon, act+obs) 初始分布
-        return: 
-            loss: 
-            info: dict
-        
-        model API: delta, _, _ = self.model(x, cond, t, A, b, contact)
-        """
-        device = x.device
-
-
-        # Flow Matching Loss Calculation
-        steps = self.n_timesteps
-        k = torch.randint(0, steps, (x.size(0),), device=device)
-        t_curr = (k.float() / steps).unsqueeze(1).unsqueeze(1)       # [B, 1, 1]
-        t_next = ((k.float() + 1) / steps).unsqueeze(1).unsqueeze(1) # [B, 1, 1]
-        
-        x_curr = (1 - t_curr) * x0 + t_curr * x
-        x_next = (1 - t_next) * x0 + t_next * x
-        target_delta = x_next - x_curr
-        
-        # 4. Apply conditioning to model input
-        # 这有助于模型在推理时感知到正确的上下文
-        x_curr = apply_conditioning(x_curr, cond, self.action_dim)
-
-        pred_delta, _, _ = self.model(x_curr, cond, t_curr.flatten(), A, b, contact)
-
-        # 对于obs condition部分，不计算loss
-        target_delta[:, 0, self.action_dim:] = 0.0
-        pred_delta[:, 0, self.action_dim:] = 0.0
-        loss, info = self.loss_fn(pred_delta, target_delta)
-
-        # debug
-        if torch.isnan(loss).any():
-            print("nan!")
-            print("somehting wrong!")
-
-        return loss, info
-
-    def forward(self, cond, verbose, **kwargs):
-        """
-        Docstring for forward
-        
-        :param self: Description
-        :param cond: Description
-        :param verbose: Description
-        还必须输入以下参数：
-        :param A (batch, horizon, 4, num_cons, 3)
-        :param b (batch, horizon, 4, num_cons,)
-        :param contact (batch, horizon, 4)
-        :param x0 (batch, horizon, act+obs) 初始分布采样
-        """
-        return self.conditional_sample(cond, verbose, **kwargs)
-    
-    @torch.no_grad()
-    def conditional_sample(self, cond, verbose=True, return_chain=True, A=None, b=None, contact=None, x0=None, **sample_kwargs): 
-        """
-        conditional_sample
-        
-        :param self: Description
-        :param cond: dict {horizon_idx: (batch, obs_dim)}
-        :param A [batch, horizon, 4, num_cons, 3]
-        :param b [batch, horizon, 4, num_cons,]
-        :param contact [batch, horizon, 4]
-        :param x0 (batch, horizon, act+obs) 初始分布采样
-        :param verbose: Description
-        :param return_chain: Description
-        :param sample_kwargs: Description
-        """
-        batch_size = len(cond[0])
-        horizon = self.horizon
-        assert horizon == A.shape[1]
-        shape = (batch_size, horizon, self.transition_dim)
-
-        return self.p_sample_loop(shape, cond, A=A, b=b, contact=contact, x0=x0, verbose=verbose, return_chain=return_chain, **sample_kwargs)    # debug
-
-    @torch.no_grad()
-    def p_sample_loop(self, shape, cond, A=None, b=None, contact=None, x0=None, verbose=True, return_chain=False, sample_fn=None, guide=None, **sample_kwargs):
-        """
-        Docstring for p_sample_loop
-        
-        :param self: Description
-        :param shape: Description
-        :param cond: Description
-        :param verbose: Description
-        :param return_chain: Description
-        :param sample_fn: Description
-        :param guide: Description
-        :param sample_kwargs: Description
-        """
-        device = next(iter(self.model.parameters())).device # assuming model is on correct device
-        batch_size = shape[0]
-
-        x, A, b, contact = x0.float().to(device), A.float().to(device), b.float().to(device), contact.float().to(device)
-        
-        # 2. Force start condition
-        x = apply_conditioning(x, cond, self.action_dim)
-
-        chain = [x] if return_chain else None
-        
-        # Setup progress bar
-        iterator = range(self.n_timesteps)
-        progress = utils.Progress(self.n_timesteps) if verbose else utils.Silent()
-        
-
-        # 3. Integration Loop: t goes from 0 to 1
-        for i in iterator:
-            # Current time t (scalar)
-            t_value = i / self.n_timesteps
-            
-            # Create batch time tensor
-            t = torch.full((batch_size,), t_value, device=device, dtype=torch.float32)
-
-            pred_delta, _, _ = self.model(x, cond, t, A, b, contact)
-            x = x + pred_delta
-
-            # 5. Re-apply conditioning
-            x = apply_conditioning(x, cond, self.action_dim)
-
-            if return_chain: chain.append(x)
-
-        progress.stamp()
-
-        if return_chain: chain = torch.stack(chain, dim=1)
-        
-        # Return Sample namedtuple to match your interface
         values = torch.zeros((batch_size,), device=device, dtype=torch.float32)
         return Sample(x, values, chain), 0
     
@@ -1305,17 +1003,15 @@ class GaugeFlowMatching(nn.Module):
         ## get loss coefficients and initialize objective
         loss_weights = self.get_loss_weights(action_weight, loss_discount, loss_weights)
         self.loss_fn = Losses[loss_type](loss_weights, self.action_dim)
-        self.loss_weights = loss_weights # Store weights to apply later
+        self.loss_weights = loss_weights 
 
         self.full_constrained_idxs = full_constrained_idxs
         
-        # Convert constraints to tensors
         self.normed_single_A = None
         self.normed_single_b = None
         self.normed_center_point = None
 
         if len(self.full_constrained_idxs) > 0:
-            # Ensure float32
             self.normed_single_A = torch.from_numpy(normed_single_A).float()
             self.normed_single_b = torch.from_numpy(normed_single_b).float()
             self.normed_center_point = torch.from_numpy(normed_center_point).float()
@@ -1353,8 +1049,6 @@ class GaugeFlowMatching(nn.Module):
     
     def _get_boundary_distance(self, v):
         """
-        计算从内部点 x_circle 沿着方向 v 到达多面体边界的距离 d_C(x_circle, v)。
-        基于论文 Table 3 的 Linear Constraints 公式。
         
         kappa(v) = max_i { (a_i^T v) / (b_i - a_i^T x_circle) }^+
         d_C = 1 / kappa
@@ -1367,47 +1061,27 @@ class GaugeFlowMatching(nn.Module):
         b = self.normed_single_b.to(v.device) # (num_cons)
         x_c = self.normed_center_point.to(v.device) # (dim)
 
-        # 1. Numerator: A @ v
-        # v shape: (B, H, D), A shape: (K, D) -> (B, H, K)
-        # We assume v is NOT normalized in this calculation if we follow Eq 13 strictly,
-        # but usually ray casting uses direction. The paper implies v is a direction unit vector for d_C definition.
-        # However, for efficiency, we calculate with v and normalize implicitly or explicitly.
-        # Let's use normalized direction u = v / ||v|| for the definition.
         
         norm_v = torch.norm(v, dim=-1, keepdim=True) + 1e-6
         u = v / norm_v # Unit vector direction
 
         numerator = torch.matmul(u, A.T) # (..., num_cons)
 
-        # 2. Denominator: b - A @ x_c
-        # This is constant, can be precomputed
         denom = b - torch.matmul(A, x_c) # (num_cons,)
-        denom = denom.view(1, 1, -1) # Broadcastable
+        denom = denom.view(1, 1, -1) 
 
-        # 3. Ratio
-        # We only care about constraints we are moving TOWARDS (numerator > 0)
-        # If numerator <= 0, the ray moves away from that constraint boundary (infinite distance)
-        # kappa is the inverse distance.
         ratio = numerator / (denom + 1e-8)
         
-        # 4. Max over constraints (Intersection)
-        # kappa = max(0, max_i(ratio_i))
+
         kappa = torch.max(ratio, dim=-1, keepdim=True)[0]
         kappa = torch.relu(kappa) # Ensure non-negative
 
-        # 5. Distance d_C = 1 / kappa
-        # If kappa is 0 (unbounded in that direction), dist is inf. 
-        # But for Compact sets, kappa > 0 usually.
         dist = 1.0 / (kappa + 1e-6)
         
         return dist
 
     def project_to_ball(self, x):
         """
-        实现论文中的 Gauge Mapping Inverse: Phi^{-1}(x) : C -> B
-        将受约束空间中的点 x 映射到单位球 B 内的点 z。
-        
-        Equation (14): Phi^{-1}(x) = (x - x_c) / d_C(x_c, direction)
         
         Input: x (batch, horizon, dim) - includes unconstrained dims
         Return: z (batch, horizon, dim)
@@ -1418,7 +1092,6 @@ class GaugeFlowMatching(nn.Module):
         z = x.clone()
         device = x.device
         
-        # 提取受约束的部分
         x_cons = x[..., self.full_constrained_idxs] # (B, H, D_cons)
         x_c = self.normed_center_point.to(device)
 
@@ -1434,23 +1107,11 @@ class GaugeFlowMatching(nn.Module):
         # z = diff / d_boundary
         z_cons = diff / (d_boundary + 1e-6)
         
-        # Check: If x is on boundary, ||diff|| = d_boundary -> ||z|| = 1. Correct.
-        
         z[..., self.full_constrained_idxs] = z_cons
         return z
 
     def transfer_to_target(self, z):
         """
-        实现论文中的 Gauge Mapping Forward: Phi(z) : B -> C
-        将单位球 B 内的点 z 映射回受约束空间 C。
-        
-        Equation (13): Phi(z) = d_C(x_c, z/||z||) * z + x_c
-        Wait, Eq 13 says: Phi(z) = d_C * z + x_c. 
-        If z is in unit ball, this scales z by the boundary distance.
-        Note: The paper formula in Eq 13 seems to have a small notation overlap.
-        More precisely: x = x_c + (z / ||z||) * ||z|| * d_C(direction)
-                          = x_c + z * d_C(direction)
-        This assumes we map percentage of radius.
         
         Input: z (batch, horizon, dim) - latent space
         Return: x (batch, horizon, dim) - target space
@@ -1476,8 +1137,8 @@ class GaugeFlowMatching(nn.Module):
     def random_sample_source(self, x_ref):
         """
         Sample z_0.
-        Constrained dims: Uniformly from Unit Ball (Paper Eq 3 text).
-        Unconstrained dims: Standard Normal (Gaussian).
+        Constrained dims: Uniformly from Unit Ball.
+        Unconstrained dims: Standard Normal.
         """
         batch_size, horizon, dim = x_ref.shape
         z0 = torch.randn_like(x_ref)
@@ -1486,8 +1147,7 @@ class GaugeFlowMatching(nn.Module):
             idx = self.full_constrained_idxs
             dim_cons = len(idx)
             
-            # Sample uniform in L2 ball
-            # Method: Sample Gaussian, normalize, scale by r^(1/d)
+
             raw = torch.randn(batch_size, horizon, dim_cons, device=x_ref.device)
             direction = raw / (torch.norm(raw, dim=-1, keepdim=True) + 1e-6)
             
@@ -1518,20 +1178,8 @@ class GaugeFlowMatching(nn.Module):
         if mask_out.sum() == 0:
             return z
             
-        # Projection/Reflection Strategy
-        # Simple projection: z = z / norm
-        # Reflection (as per paper Reflected FM reference): 
-        # If outside, reflect velocity? Since we are doing discrete steps x_{t+1},
-        # we map the point back.
-        # A simple robust way is projection to boundary for feasibility:
         z_cons_proj = z_cons / (norm + 1e-6)
         
-        # Or simple "bounce" back: z_new = z_boundary - (z_out - z_boundary)
-        # z_new = 2*z_proj - z_out
-        # This keeps the "energy" but changes direction.
-        # Let's use projection to ensure strict safety as shown in "Projected-GFM"
-        # or strict reflection. Let's do Projection for stability in simple implementation.
-        # Paper Table 2 shows Projected-GFM is also very good.
         z_cons_safe = z_cons * (1.0 - mask_out) + z_cons_proj * mask_out
         
         z[..., idx] = z_cons_safe
@@ -1542,44 +1190,35 @@ class GaugeFlowMatching(nn.Module):
         Compute Gauge Flow Matching Loss.
         Training is performed in the latent space (Unit Ball for constrained dims).
         
-        x: (batch, horizon, dim) -- Target Data (in Constrained Space C)
+        x: (batch, horizon, dim) 
         """
         batch_size = len(x)
         device = x.device
 
-        # 1. Transform Data x -> Latent z
-        # Eq (2): z_1 = Phi^{-1}(x_1)
+
         z_1 = self.project_to_ball(x)
         
-        # 2. Sample continuous time t uniform in [0, 1]
+
         t = torch.rand((batch_size,), device=device)
 
-        # 3. Sample source noise z_0
         # Constrained dims: Uniform(Ball), Unconstrained: Normal(0,I)
         z_0 = self.random_sample_source(x)
 
-        # 4. Compute Interpolation (Optimal Transport Path in Latent Space)
         # z_t = (1 - t) * z_0 + t * z_1
         t_b = t.view(batch_size, 1, 1)
         z_t = (1 - t_b) * z_0 + t_b * z_1
 
-        # 5. apply condition
         z_t = apply_conditioning(z_t, cond, self.action_dim)
             
-        # 6. Model Forward
         # Predict vector field v_theta(z_t, t)
         v_pred = self.model(z_t, cond, t)
 
-        # 7. Compute Target Velocity
         # v_target = z_1 - z_0
         v_target = z_1 - z_0
 
-        # 不计算condition部分的loss
         v_pred[:, 0, self.action_dim:] = 0.0
         v_target[:, 0, self.action_dim:] = 0.0
 
-        # 8. Compute Loss
-        # We assume loss_fn is MSE. Weighted by dimensions.
         loss, info = self.loss_fn(v_pred, v_target) # (B, H, D)
 
         return loss, info
@@ -1608,37 +1247,26 @@ class GaugeFlowMatching(nn.Module):
         device = next(iter(self.model.parameters())).device 
         batch_size = shape[0]
 
-        # 1. Start from Latent Source (z=0)
         # Construct a dummy tensor to use random_sample_source
         dummy_x = torch.zeros(shape, device=device)
         z = self.random_sample_source(dummy_x)
         
-        # Apply conditioning (Project condition to ball first!)
-        # Assuming apply_conditioning helper exists in utils or outer scope
-        # Here we just conceptualize: cond_z = Phi^{-1}(cond_x)
         z = apply_conditioning(z, cond, self.action_dim)
         
         chain = [z] if return_chain else None
         
         iterator = range(self.n_timesteps)
         
-        # Define time step size dt
         dt = 1.0 / self.n_timesteps
 
-        # Default Euler Step
-        # Need to ensure sample_fn signature matches
-        # def euler_step(model, x, cond, t, dt, ...): return x + v*dt
         
         for i in iterator:
             t_value = i / self.n_timesteps
             t = torch.full((batch_size,), t_value, device=device, dtype=torch.float32)
 
-            # 2. Predict Velocity & Step
             v_pred = self.model(z, cond, t)
             z = z + v_pred * dt
 
-            # 3. Reflection / Projection (Eq 4 in paper)
-            # 必须保证生成过程在 Unit Ball 内部，否则 Gauge Map 会失效或产生巨大的 Lipschitz 误差
             z = self._reflect_in_ball(z)
 
             # Re-apply conditioning
@@ -1646,13 +1274,11 @@ class GaugeFlowMatching(nn.Module):
 
             if return_chain: chain.append(z)
 
-        # 4. Final Transform: Latent (z) -> Data (x)
-        # Gauge Mapping Forward
+
         x_final = self.transfer_to_target(z)
         x_final = apply_conditioning(x_final, cond, self.action_dim)
         
-        # If returning chain, we might want to map the whole chain or just the end
-        # Usually visualization wants the x-space chain
+
         if return_chain:
             # Map all steps to x-space
             chain_z = torch.stack(chain, dim=1) # (B, Steps, H, D)

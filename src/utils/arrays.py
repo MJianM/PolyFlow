@@ -10,7 +10,6 @@ DEVICE = 'cuda:0'
 
 
 def set_all_seed(seed: int):
-	# 1. 基础随机种子
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
