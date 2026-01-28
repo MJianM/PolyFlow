@@ -12,7 +12,7 @@ env_name: "maze2d"
 algo_name: "oneray"
 run_name: "train" # current run
 seed: 42
-device: "cuda:3"
+device: "cuda:0"
 
 x_dim: 2
 num_cons: 4
