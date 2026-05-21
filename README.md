@@ -1,7 +1,7 @@
 
 # PolyFlow: Safety Guaranteed and Sample Efficient Flow Matching via Constraint Embedding and Projection-free Update
 
-This repository contains the official implementation of the paper **"PolyFlow: Safety Guaranteed and Sample Efficient Flow Matching via Constraint Embedding and Projection-free Update"** (Under Review for ICML 2026).
+This repository contains the official implementation of the paper **"PolyFlow: Safety Guaranteed and Sample Efficient Flow Matching via Constraint Embedding and Projection-free Update"** (Accepted for ICML 2026).
 
 ## 📄 Abstract
 
